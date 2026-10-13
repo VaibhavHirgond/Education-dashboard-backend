@@ -1,0 +1,24 @@
+{
+ "content": null,
+ "creation": "2026-10-13 10:02:24.204787",
+ "docstatus": 0,
+ "doctype": "Page",
+ "icon": "graduation-cap",
+ "idx": 0,
+ "modified": "2026-10-13 14:24:51.307522",
+ "modified_by": "Administrator",
+ "module": "Backend Custom App",
+ "name": "education-dashboard",
+ "owner": "Administrator",
+ "page_name": "education-dashboard",
+ "roles": [
+  {
+   "role": "Administrator"
+  }
+ ],
+ "script": null,
+ "standard": "Yes",
+ "style": null,
+ "system_page": 0,
+ "title": "Dashboard"
+}

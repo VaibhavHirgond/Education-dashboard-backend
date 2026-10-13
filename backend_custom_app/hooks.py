@@ -124,15 +124,20 @@ app_license = "mit"
 
 # Permissions
 # -----------
-# Permissions evaluated in scripted ways
+# Learners only ever read their own rows through the generic REST
+# API; staff and education operators keep full access.
 
-# permission_query_conditions = {
-# 	"Event": "frappe.desk.doctype.event.event.get_permission_query_conditions",
-# }
-#
-# has_permission = {
-# 	"Event": "frappe.desk.doctype.event.event.has_permission",
-# }
+from backend_custom_app.api.permissions import RESTRICTED_FOR_STUDENTS  # noqa: E402
+
+permission_query_conditions = {
+    doctype: "backend_custom_app.api.permissions.student_query_conditions"
+    for doctype in RESTRICTED_FOR_STUDENTS
+}
+
+has_permission = {
+    doctype: "backend_custom_app.api.permissions.student_has_permission"
+    for doctype in RESTRICTED_FOR_STUDENTS
+}
 
 # Document Events
 # ---------------
@@ -146,6 +151,11 @@ app_license = "mit"
 # 	}
 # }
 
+doc_events = {
+    "Payment Entry": {
+        "on_submit": "backend_custom_app.api.payment.payment_entry_submitted"
+    }
+}
 # Scheduled Tasks
 # ---------------
 

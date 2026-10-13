@@ -1,0 +1,24 @@
+{
+ "content": null,
+ "creation": "2026-10-13 16:16:09.265231",
+ "docstatus": 0,
+ "doctype": "Page",
+ "icon": "graduation-cap",
+ "idx": 0,
+ "modified": "2026-10-13 16:16:09.265231",
+ "modified_by": "Administrator",
+ "module": "Backend Custom App",
+ "name": "instructor-dashboard",
+ "owner": "Administrator",
+ "page_name": "instructor-dashboard",
+ "roles": [
+  {
+   "role": "Instructor"
+  }
+ ],
+ "script": null,
+ "standard": "Yes",
+ "style": null,
+ "system_page": 0,
+ "title": "Instructor Dashboard"
+}

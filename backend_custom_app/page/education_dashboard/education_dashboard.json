@@ -1,0 +1,10 @@
+{
+  "doctype": "Page",
+  "name": "education-dashboard",
+  "page_name": "Education Dashboard",
+  "title": "Education Dashboard",
+  "module": "Backend Custom App",
+  "standard": "Yes",
+  "system_page": 0,
+  "icon": "graduation-cap"
+}
