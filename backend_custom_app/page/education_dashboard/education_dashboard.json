@@ -1,10 +1,33 @@
 {
-  "doctype": "Page",
-  "name": "education-dashboard",
-  "page_name": "Education Dashboard",
-  "title": "Education Dashboard",
-  "module": "Backend Custom App",
-  "standard": "Yes",
-  "system_page": 0,
-  "icon": "graduation-cap"
+ "content": null,
+ "creation": "2026-10-13 10:02:24.204787",
+ "docstatus": 0,
+ "doctype": "Page",
+ "icon": "graduation-cap",
+ "idx": 0,
+ "modified": "2026-10-13 19:13:18.450445",
+ "modified_by": "Administrator",
+ "module": "Backend Custom App",
+ "name": "education-dashboard",
+ "owner": "Administrator",
+ "page_name": "education-dashboard",
+ "roles": [
+  {
+   "role": "Administrator"
+  },
+  {
+   "role": "System Manager"
+  },
+  {
+   "role": "Education Manager"
+  },
+  {
+   "role": "Academics User"
+  }
+ ],
+ "script": null,
+ "standard": "Yes",
+ "style": null,
+ "system_page": 0,
+ "title": "Dashboard"
 }

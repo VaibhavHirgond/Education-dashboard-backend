@@ -1,4 +1,3 @@
-
 frappe.pages['education-dashboard'].on_page_load = function (wrapper) {
     const page = frappe.ui.make_app_page({
         parent: wrapper,
@@ -12,28 +11,39 @@ frappe.pages['education-dashboard'].on_page_load = function (wrapper) {
         overflow: 'hidden'
     });
 
+    // Same-origin relative URL: works for every local and production
+    // hostname without hardcoding a host, port or scheme.
+    // Same origin also means the browser sends the active Frappe session
+    // cookie with every request the embedded app makes.
     const frame = document.createElement('iframe');
 
-    frame.src = 'http://erpnext.localhost:8080/frontend/#/';
+    frame.src = '/assets/frontend_custom_app/frontend/index.html#/';
     frame.title = 'Education Dashboard';
     frame.style.width = '100%';
     frame.style.height = '700px';
     frame.style.border = '0';
     frame.style.display = 'block';
 
-    window.addEventListener('message', function (event) {
-        if (event.origin !== 'http://erpnext.localhost:8080') {
+    page.main[0].appendChild(frame);
+
+    // Give the dashboard exactly the space below the Desk page header.
+    // The Vue app scrolls inside the frame when it is taller than the
+    // window, so no postMessage based resizing is needed (and none can
+    // ever fight with the layout).
+    function fitFrame() {
+        const rect = frame.getBoundingClientRect();
+
+        // The Desk keeps page containers around while hidden; a hidden
+        // frame reports an all-zero rect, so keep the last good size.
+        if (!rect.width && !rect.height) {
             return;
         }
 
-        if (event.data?.type === 'education-dashboard-height') {
-            const height = Number(event.data.height);
+        const available = Math.floor(window.innerHeight - rect.top - 8);
 
-            if (Number.isFinite(height) && height > 0) {
-                frame.style.height = `${height}px`;
-            }
-        }
-    });
+        frame.style.height = Math.max(available, 320) + 'px';
+    }
 
-    page.main[0].appendChild(frame);
+    fitFrame();
+    window.addEventListener('resize', fitFrame);
 };

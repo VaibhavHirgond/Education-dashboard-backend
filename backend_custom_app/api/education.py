@@ -3,6 +3,7 @@ import json
 import frappe
 
 from frappe.utils import (
+    add_days,
     get_first_day,
     get_last_day,
     add_months,
@@ -20,6 +21,7 @@ from backend_custom_app.api.permissions import (
     is_student_portal,
     require_education_access,
     require_education_scope,
+    require_staff,
 )
 
 
@@ -84,7 +86,11 @@ def _instructor_dashboard():
     record = get_instructor_record()
 
     groups = get_instructor_groups()
-    students = get_instructor_students()
+
+    # A learner enrolled in several of this instructor's groups must
+    # only be counted once.
+    students = sorted(set(get_instructor_students()))
+
     today = nowdate()
 
     # ---------------------------------------------------------
@@ -102,6 +108,7 @@ def _instructor_dashboard():
                 "student_group_name",
                 "program",
                 "course",
+                "batch",
                 "academic_year",
                 "academic_term",
             ],
@@ -113,6 +120,7 @@ def _instructor_dashboard():
                 "course": frappe.db.get_value("Course", group.course, "course_name")
                 or group.course
                 or "",
+                "batch": group.batch or "",
                 "academicYear": group.academic_year or "",
                 "academicTerm": group.academic_term or "",
                 "studentCount": frappe.db.count(
@@ -217,6 +225,14 @@ def _instructor_dashboard():
     if students:
         attendance_stats = _attendance_stats({"student": ["in", students]})
 
+    # ---------------------------------------------------------
+    # Today's figures + 14-day trend (submitted records only)
+    # ---------------------------------------------------------
+
+    attendance_stats.update(
+        _instructor_attendance_today_and_trend(students, today)
+    )
+
     return {
         "mode": "instructor",
         "instructor": {
@@ -232,6 +248,100 @@ def _instructor_dashboard():
         "upcoming_sessions": upcoming_sessions,
         "pending_leave_requests": pending_leaves,
         "attendance": attendance_stats,
+    }
+
+
+def _instructor_attendance_today_and_trend(students, today, days=14):
+    """Today's attendance snapshot + a daily trend for the last ``days``.
+
+    Scoped to the given student ids, counting only submitted
+    (``docstatus = 1``) records so drafts and cancelled rows never
+    reach the dashboard. Days without records report
+    ``percentage: None`` so the UI can show a gap instead of a
+    misleading 0%.
+    """
+
+    empty = {
+        "attendance_date": today,
+        "today_present": 0,
+        "today_absent": 0,
+        "today_leave": 0,
+        "today_recorded": 0,
+        "today_percentage": None,
+        "trend": [],
+    }
+
+    if not students:
+        return empty
+
+    start = add_days(today, -(days - 1))
+
+    rows = frappe.get_all(
+        "Student Attendance",
+        filters={
+            "student": ["in", students],
+            "date": ["between", [start, today]],
+            "docstatus": 1,
+        },
+        fields=["student", "date", "status"],
+        order_by="date asc, creation asc",
+    )
+
+    # One row per (date, student): the latest submitted record of the
+    # day wins, matching how the desk attendance marking behaves.
+    by_date = {}
+
+    for row in rows:
+        date_key = row.date.isoformat() if hasattr(row.date, "isoformat") else str(row.date)
+        by_date.setdefault(date_key, {})[row.student] = row.status or ""
+
+    def _day_summary(date_key):
+        statuses = by_date.get(date_key) or {}
+
+        present = sum(1 for status in statuses.values() if status == "Present")
+        absent = sum(1 for status in statuses.values() if status == "Absent")
+        leave = sum(1 for status in statuses.values() if status == "Leave")
+        recorded = len(statuses)
+
+        parsed = getdate(date_key)
+
+        return {
+            "date": date_key,
+            "label": parsed.strftime("%d %b %Y"),
+            "short": parsed.strftime("%d"),
+            "present": present,
+            "absent": absent,
+            "leave": leave,
+            "recorded": recorded,
+            "percentage": (
+                round((present / recorded) * 100, 1) if recorded else None
+            ),
+        }
+
+    trend = []
+    cursor = today
+
+    for _ in range(days):
+        date_key = cursor.isoformat() if hasattr(cursor, "isoformat") else str(cursor)
+        trend.append(_day_summary(date_key))
+        cursor = add_days(cursor, -1)
+
+    trend.reverse()
+
+    today_summary = _day_summary(
+        today.isoformat() if hasattr(today, "isoformat") else str(today)
+    )
+
+    return {
+        "attendance_date": today.isoformat()
+        if hasattr(today, "isoformat")
+        else str(today),
+        "today_present": today_summary["present"],
+        "today_absent": today_summary["absent"],
+        "today_leave": today_summary["leave"],
+        "today_recorded": today_summary["recorded"],
+        "today_percentage": today_summary["percentage"],
+        "trend": trend,
     }
 
 
@@ -2321,7 +2431,9 @@ def get_grades():
 @frappe.whitelist()
 def get_instructors():
 
-    require_education_scope()
+    # Staff only. This lists every instructor's email and mobile number,
+    # so an instructor portal user must never reach it.
+    require_staff()
 
     # ---------------------------------------------------------
     # Instructor Fields

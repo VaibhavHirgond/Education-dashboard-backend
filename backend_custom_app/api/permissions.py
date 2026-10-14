@@ -341,6 +341,7 @@ RESTRICTED_FOR_STUDENTS = (
     "Course Schedule",
     "Student Group",
     "Assessment Result",
+    "Assessment Plan",
 )
 
 
@@ -390,6 +391,18 @@ def _learner_scope_condition(doctype, user):
             frappe.db.escape(group, percent=False) for group in groups
         )
         return f"`tab{doctype}`.`name` in ({values})"
+
+    if doctype == "Assessment Plan":
+        # Assessment Plans hang off a Student Group, not a student.
+        groups = _student_group_names(student)
+
+        if not groups:
+            return "`tabAssessment Plan`.`student_group` = ''"
+
+        values = ", ".join(
+            frappe.db.escape(group, percent=False) for group in groups
+        )
+        return f"`tabAssessment Plan`.`student_group` in ({values})"
 
     return ""
 
@@ -454,6 +467,12 @@ def _instructor_scope_condition(doctype, user):
             f"or `tabCourse Schedule`.`student_group` in ({group_values})"
         )
 
+    if doctype == "Assessment Plan":
+        # Assessment Plans hang off a Student Group, not a student.
+        if not groups:
+            return "`tabAssessment Plan`.`student_group` = ''"
+        return f"`tabAssessment Plan`.`student_group` in ({group_values})"
+
     return ""
 
 
@@ -489,6 +508,11 @@ def _learner_allowed(doc, user):
     if doctype in ("Course Schedule", "Student Group"):
         return bool(student) and doc.name in _student_group_names(student)
 
+    if doctype == "Assessment Plan":
+        return bool(student) and (
+            doc.student_group or ""
+        ) in _student_group_names(student)
+
     return True
 
 
@@ -519,6 +543,9 @@ def _instructor_allowed(doc, user):
             doc.instructor == record.name
             or doc.student_group in get_instructor_groups(user)
         )
+
+    if doctype == "Assessment Plan":
+        return (doc.student_group or "") in get_instructor_groups(user)
 
     return True
 
