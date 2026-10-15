@@ -22,13 +22,36 @@ frappe.pages['education-dashboard'].on_page_load = function (wrapper) {
 
     page.main[0].appendChild(frame);
 
+    let dashboardHeight = null;
+
     function fitFrame() {
         const rect = frame.getBoundingClientRect();
 
         if (!rect.width && !rect.height) return;
 
+        if (dashboardHeight !== null) {
+            frame.style.height = dashboardHeight + 'px';
+            return;
+        }
+
         const available = Math.floor(window.innerHeight - rect.top - 8);
         frame.style.height = Math.max(available, 320) + 'px';
+    }
+
+    function setDashboardHeight(event) {
+        if (event.origin !== window.location.origin || event.source !== frame.contentWindow) {
+            return;
+        }
+
+        const message = event.data;
+        const height = Number(message?.height);
+
+        if (message?.type !== 'education-dashboard-height' || !Number.isFinite(height) || height <= 0) {
+            return;
+        }
+
+        dashboardHeight = Math.ceil(height);
+        frame.style.height = dashboardHeight + 'px';
     }
 
     async function loadDashboard() {
@@ -63,6 +86,8 @@ frappe.pages['education-dashboard'].on_page_load = function (wrapper) {
             frame.src = '/assets/frontend_custom_app/frontend/index.html#/';
         }
     }
+
+    window.addEventListener('message', setDashboardHeight);
 
     loadDashboard();
     fitFrame();
