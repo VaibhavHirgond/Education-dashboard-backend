@@ -275,22 +275,24 @@ def get_instructor_record(user=None):
 
 
 def is_instructor_portal(user=None):
-    """True for non-staff users linked to an active Instructor record."""
+    """Identify users linked to an active Instructor record who have the Instructor role."""
 
     user = user or frappe.session.user
 
     if not user or user == "Guest":
         return False
 
-    if is_staff(user):
+    roles = set(frappe.get_roles(user))
+
+    # Keep true system administrators and system managers on the admin dashboard.
+    if roles.intersection({"Administrator", "System Manager"}):
         return False
 
     if not get_instructor_record(user):
         return False
 
-    # The account must actually hold the Instructor role; a random
-    # user whose e-mail happens to match a record is not enough.
-    return INSTRUCTOR_ROLE in set(frappe.get_roles(user))
+    return INSTRUCTOR_ROLE in roles
+
 
 
 def get_instructor_groups(user=None):

@@ -59,18 +59,42 @@ def _safe_value(value):
 # =========================================================
 
 
+def _normalize_dashboard_dates(start_date=None, end_date=None):
+    """Return a safe start/end pair for the dashboard range."""
+    today = getdate(nowdate())
+
+    def _as_date(value):
+        if not value:
+            return None
+
+        try:
+            return getdate(value)
+        except Exception:
+            return None
+
+    start = _as_date(start_date) or today
+    end = _as_date(end_date) or today
+
+    if start > end:
+        start, end = end, start
+
+    return start, end
+
+
 @frappe.whitelist()
-def get_dashboard():
+def get_dashboard(start_date=None, end_date=None):
 
     require_education_scope()
 
+    start, end = _normalize_dashboard_dates(start_date, end_date)
+
     if is_student_portal():
-        return _student_dashboard()
+        return _student_dashboard(start, end)
 
     if is_instructor_portal():
-        return _instructor_dashboard()
+        return _instructor_dashboard(start, end)
 
-    return _admin_dashboard()
+    return _admin_dashboard(start, end)
 
 
 # =========================================================
@@ -81,21 +105,14 @@ def get_dashboard():
 # =========================================================
 
 
-def _instructor_dashboard():
+def _instructor_dashboard(start_date=None, end_date=None):
 
     record = get_instructor_record()
-
     groups = get_instructor_groups()
-
-    # A learner enrolled in several of this instructor's groups must
-    # only be counted once.
     students = sorted(set(get_instructor_students()))
 
-    today = nowdate()
-
-    # ---------------------------------------------------------
-    # Group cards with student counts
-    # ---------------------------------------------------------
+    start, end = _normalize_dashboard_dates(start_date, end_date)
+    date_range = {"start_date": start.isoformat(), "end_date": end.isoformat()}
 
     group_cards = []
 
@@ -113,25 +130,75 @@ def _instructor_dashboard():
                 "academic_term",
             ],
         ):
-            group_cards.append({
-                "id": group.name,
-                "name": group.student_group_name or group.name,
-                "program": group.program or "",
-                "course": frappe.db.get_value("Course", group.course, "course_name")
-                or group.course
-                or "",
-                "batch": group.batch or "",
-                "academicYear": group.academic_year or "",
-                "academicTerm": group.academic_term or "",
-                "studentCount": frappe.db.count(
-                    "Student Group Student",
-                    {"parent": group.name, "parenttype": "Student Group"},
-                ),
-            })
+            group_cards.append(
+                {
+                    "id": group.name,
+                    "name": group.student_group_name or group.name,
+                    "program": group.program or "",
+                    "course": frappe.db.get_value("Course", group.course, "course_name")
+                    or group.course
+                    or "",
+                    "batch": group.batch or "",
+                    "academicYear": group.academic_year or "",
+                    "academicTerm": group.academic_term or "",
+                    "studentCount": frappe.db.count(
+                        "Student Group Student",
+                        {"parent": group.name, "parenttype": "Student Group"},
+                    ),
+                }
+            )
 
-    # ---------------------------------------------------------
-    # Today's + upcoming sessions (own sessions only)
-    # ---------------------------------------------------------
+    student_cards = []
+
+    if students:
+        student_rows = frappe.get_all(
+            "Student",
+            filters={"name": ["in", students]},
+            fields=_existing_fields(
+                "Student",
+                [
+                    "name",
+                    "student_name",
+                    "title",
+                    "image",
+                    "enabled",
+                ],
+            ),
+            order_by="student_name asc",
+            limit_page_length=500,
+        )
+
+        for student_row in student_rows:
+            student_cards.append(
+                {
+                    "id": student_row.name,
+                    "name": (
+                        student_row.get("student_name")
+                        or student_row.get("title")
+                        or student_row.name
+                    ),
+                    "image": student_row.get("image") or "",
+                    "enabled": student_row.get("enabled"),
+                }
+            )
+
+    course_cards = []
+    seen_courses = set()
+
+    for group in group_cards:
+        course_name = group.get("course") or ""
+
+        if course_name and course_name not in seen_courses:
+            seen_courses.add(course_name)
+            course_cards.append(
+                {
+                    "name": course_name,
+                    "group": group.get("name") or "",
+                    "studentCount": group.get("studentCount", 0),
+                    "program": group.get("program") or "",
+                    "batch": group.get("batch") or "",
+                }
+            )
 
     def _session_rows(filters, limit):
         rows = frappe.get_all(
@@ -157,29 +224,22 @@ def _instructor_dashboard():
                 "course": frappe.db.get_value("Course", row.course, "course_name")
                 or row.course,
                 "room": row.room or "",
-                "date": row.schedule_date.isoformat()
-                if row.schedule_date
-                else "",
+                "date": row.schedule_date.isoformat() if row.schedule_date else "",
                 "fromTime": str(row.from_time) if row.from_time else "",
                 "toTime": str(row.to_time) if row.to_time else "",
-                "isToday": bool(row.schedule_date)
-                and str(row.schedule_date) == today,
+                "isToday": bool(row.schedule_date) and str(row.schedule_date) == start.isoformat(),
             }
             for row in rows
         ]
 
     instructor_name = record.name if record else "__none__"
 
-    today_sessions = _session_rows(
-        {"instructor": instructor_name, "schedule_date": today}, 20
-    )
-    upcoming_sessions = _session_rows(
-        {"instructor": instructor_name, "schedule_date": [">", today]}, 20
-    )
-
-    # ---------------------------------------------------------
-    # Pending leave requests for own students
-    # ---------------------------------------------------------
+    session_filters = {"instructor": instructor_name, "schedule_date": ["between", [start, end]]}
+    scheduled_sessions = _session_rows(session_filters, 50)
+    today_sessions = [session for session in scheduled_sessions if session["date"] == start.isoformat()]
+    upcoming_sessions = [
+        session for session in scheduled_sessions if session["date"] > start.isoformat()
+    ]
 
     pending_leaves = []
 
@@ -205,9 +265,7 @@ def _instructor_dashboard():
                 "id": row.name,
                 "student": row.student,
                 "studentName": row.student_name or "",
-                "fromDate": row.from_date.isoformat()
-                if row.from_date
-                else "",
+                "fromDate": row.from_date.isoformat() if row.from_date else "",
                 "toDate": row.to_date.isoformat() if row.to_date else "",
                 "reason": row.reason or "",
                 "status": "Pending",
@@ -215,54 +273,76 @@ def _instructor_dashboard():
             for row in leave_rows
         ]
 
-    # ---------------------------------------------------------
-    # Attendance stats scoped to own students
-    # ---------------------------------------------------------
-
-    attendance_stats = {"total": 0, "present": 0, "absent": 0, "leave": 0,
-                        "percentage": 0, "students": 0}
+    attendance_stats = {"total": 0, "present": 0, "absent": 0, "leave": 0, "percentage": 0, "students": 0}
 
     if students:
         attendance_stats = _attendance_stats({"student": ["in", students]})
 
-    # ---------------------------------------------------------
-    # Today's figures + 14-day trend (submitted records only)
-    # ---------------------------------------------------------
-
     attendance_stats.update(
-        _instructor_attendance_today_and_trend(students, today)
+        _instructor_attendance_today_and_trend(
+            students=students,
+            start_date=start,
+            end_date=end,
+        )
     )
+
+    instructor_payload = {
+        "id": record.name if record else "",
+        "name": (record.instructor_name if record else "") or "",
+        "email": (record.get("custom_instructor_email") if record else "") or "",
+        "status": (record.get("status") if record else "") or "",
+        "image": (record.get("image") if record else "") or "",
+    }
 
     return {
         "mode": "instructor",
-        "instructor": {
-            "id": record.name if record else "",
-            "name": (record.instructor_name if record else "") or "",
-        },
+        "instructor": instructor_payload,
+        "students": student_cards,
+        "courses": course_cards,
         "groups": group_cards,
         "students_count": len(students),
-        "sessions_count": frappe.db.count(
-            "Course Schedule", {"instructor": instructor_name}
-        ),
+        "sessions_count": frappe.db.count("Course Schedule", {"instructor": instructor_name}),
         "today_sessions": today_sessions,
         "upcoming_sessions": upcoming_sessions,
         "pending_leave_requests": pending_leaves,
         "attendance": attendance_stats,
+        "filters": {"start_date": start.isoformat(), "end_date": end.isoformat()},
     }
 
 
-def _instructor_attendance_today_and_trend(students, today, days=14):
+def _instructor_attendance_today_and_trend(
+    students,
+    start_date=None,
+    end_date=None,
+    days=14,
+):
     """Today's attendance snapshot + a daily trend for the last ``days``.
 
-    Scoped to the given student ids, counting only submitted
-    (``docstatus = 1``) records so drafts and cancelled rows never
-    reach the dashboard. Days without records report
-    ``percentage: None`` so the UI can show a gap instead of a
-    misleading 0%.
+    The range defaults to the last 14 calendar days. When callers provide a
+    date range, the trend is limited to that selected window so filters visibly
+    affect the data returned to the dashboard.
     """
 
+    if isinstance(end_date, str):
+        end_date = getdate(end_date)
+
+    if isinstance(start_date, str):
+        start_date = getdate(start_date)
+
+    effective_end = end_date or getdate(nowdate())
+    effective_start = start_date or add_days(effective_end, -(days - 1))
+
+    if effective_end < effective_start:
+        effective_start, effective_end = effective_end, effective_start
+
+    # Keep the requested range compact; when a wider range is selected, clamp to
+    # the newest 14-day window so the chart remains readable.
+    span_days = (effective_end - effective_start).days + 1
+    if span_days > days:
+        effective_start = add_days(effective_end, -(days - 1))
+
     empty = {
-        "attendance_date": today,
+        "attendance_date": effective_end.isoformat(),
         "today_present": 0,
         "today_absent": 0,
         "today_leave": 0,
@@ -274,21 +354,17 @@ def _instructor_attendance_today_and_trend(students, today, days=14):
     if not students:
         return empty
 
-    start = add_days(today, -(days - 1))
-
     rows = frappe.get_all(
         "Student Attendance",
         filters={
             "student": ["in", students],
-            "date": ["between", [start, today]],
+            "date": ["between", [effective_start, effective_end]],
             "docstatus": 1,
         },
         fields=["student", "date", "status"],
         order_by="date asc, creation asc",
     )
 
-    # One row per (date, student): the latest submitted record of the
-    # day wins, matching how the desk attendance marking behaves.
     by_date = {}
 
     for row in rows:
@@ -313,29 +389,23 @@ def _instructor_attendance_today_and_trend(students, today, days=14):
             "absent": absent,
             "leave": leave,
             "recorded": recorded,
-            "percentage": (
-                round((present / recorded) * 100, 1) if recorded else None
-            ),
+            "percentage": round((present / recorded) * 100, 1) if recorded else None,
         }
 
     trend = []
-    cursor = today
+    cursor = effective_end
 
-    for _ in range(days):
-        date_key = cursor.isoformat() if hasattr(cursor, "isoformat") else str(cursor)
+    while cursor >= effective_start:
+        date_key = cursor.isoformat()
         trend.append(_day_summary(date_key))
         cursor = add_days(cursor, -1)
 
     trend.reverse()
 
-    today_summary = _day_summary(
-        today.isoformat() if hasattr(today, "isoformat") else str(today)
-    )
+    today_summary = _day_summary(effective_end.isoformat())
 
     return {
-        "attendance_date": today.isoformat()
-        if hasattr(today, "isoformat")
-        else str(today),
+        "attendance_date": effective_end.isoformat(),
         "today_present": today_summary["present"],
         "today_absent": today_summary["absent"],
         "today_leave": today_summary["leave"],
@@ -354,7 +424,7 @@ def _instructor_attendance_today_and_trend(students, today, days=14):
 # =========================================================
 
 
-def _student_dashboard():
+def _student_dashboard(start_date=None, end_date=None):
 
     record = get_student_record()
 
@@ -660,7 +730,7 @@ def _student_dashboard():
     }
 
 
-def _admin_dashboard():
+def _admin_dashboard(start_date=None, end_date=None):
 
     # ---------------------------------------------------------
     # Total Students
