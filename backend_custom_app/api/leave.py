@@ -492,6 +492,9 @@ def reject_leave(name=None):
         frappe.db.set_value(
             "Student Leave Application", name, "docstatus", 2, update_modified=True
         )
+        from backend_custom_app.api.student_notifications import leave_rejected
+
+        leave_rejected(doc)
 
     return {
         "success": True,

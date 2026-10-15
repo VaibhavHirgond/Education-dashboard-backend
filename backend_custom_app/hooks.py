@@ -154,7 +154,22 @@ has_permission = {
 doc_events = {
     "Payment Entry": {
         "on_submit": "backend_custom_app.api.payment.payment_entry_submitted"
-    }
+    },
+    "Student Attendance": {
+        "on_submit": "backend_custom_app.api.student_notifications.attendance_submitted",
+        "on_update_after_submit": "backend_custom_app.api.student_notifications.attendance_updated",
+    },
+    "Student Leave Application": {
+        "on_submit": "backend_custom_app.api.student_notifications.leave_approved",
+        "on_cancel": "backend_custom_app.api.student_notifications.leave_rejected",
+    },
+    "Assessment Result": {
+        "on_submit": "backend_custom_app.api.student_notifications.assessment_result_submitted"
+    },
+}
+
+scheduler_events = {
+    "daily": ["backend_custom_app.api.student_notifications.notify_upcoming_classes"]
 }
 # Scheduled Tasks
 # ---------------

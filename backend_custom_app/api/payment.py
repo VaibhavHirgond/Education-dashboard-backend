@@ -83,6 +83,10 @@ def payment_entry_submitted(doc, method):
     if not invoice.student:
         return
 
+    from backend_custom_app.api.student_notifications import payment_entry_submitted
+
+    payment_entry_submitted(doc, invoice)
+
     student = frappe.get_doc("Student", invoice.student)
 
     # ---------------------------------------------------------
