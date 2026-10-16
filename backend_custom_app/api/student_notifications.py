@@ -1,7 +1,7 @@
 """Student-scoped in-app notifications backed by Frappe Notification Log."""
 
 import frappe
-from frappe.utils import add_days, flt, strip_html, today
+from frappe.utils import add_days, flt, formatdate, strip_html, today
 
 from backend_custom_app.api.permissions import (
     get_student_record,
@@ -20,6 +20,7 @@ PORTAL_ROUTES = {
 }
 CATEGORIES = {
     "Assessment Result": "Grades",
+    "Assessment Plan": "Assessment",
     "Course Schedule": "Schedule",
     "Payment Entry": "Fees",
     "Sales Invoice": "Fees",
@@ -272,6 +273,173 @@ def assessment_result_submitted(doc, method=None):
         result,
         "Assessment Result",
         doc.name,
+    )
+
+
+# =========================================================
+# ASSESSMENT PLAN -> STUDENT NOTIFICATIONS
+# =========================================================
+
+
+def assessment_plan_submitted(doc, method=None):
+    """Notify the plan's student group once, when the plan is submitted.
+
+    Assessment Plan is submittable, so ``on_submit`` fires exactly once
+    per document lifecycle (draft edits and ordinary saves never reach
+    it). Each recipient is additionally guarded by an existing
+    ``Notification Log`` check, so a re-run, retry or re-hook never
+    duplicates a delivered notification. Every per-student failure is
+    logged and swallowed so a broken mail server or a missing student
+    user can never roll back a valid Assessment Plan.
+    """
+
+    if doc.docstatus != 1:
+        return
+
+    students = _plan_students(doc.student_group)
+
+    if not students:
+        frappe.log_error(
+            title=f"Assessment Plan notification: empty group ({doc.name})",
+            message=(
+                f"Assessment Plan {doc.name} was submitted but student group "
+                f"'{doc.student_group}' has no active students, so nobody was notified."
+            ),
+        )
+        return
+
+    subject = _assessment_plan_subject(doc)
+    message = _assessment_plan_message(doc)
+
+    for student in students:
+        try:
+            user = _student_user(student)
+
+            if not user:
+                frappe.log_error(
+                    title=f"Assessment Plan notification: no user ({doc.name})",
+                    message=(
+                        f"Student '{student}' in group '{doc.student_group}' has no "
+                        f"linked enabled user; the notification for Assessment Plan "
+                        f"{doc.name} was skipped for them."
+                    ),
+                )
+                continue
+
+            # Idempotency: one in-app notification (and therefore one
+            # email) per student per plan, no matter how often the hook
+            # or a background retry runs.
+            if _already_notified(user, doc.name):
+                continue
+
+            create_student_notification(
+                student,
+                subject,
+                message,
+                "Assessment Plan",
+                doc.name,
+            )
+            _send_assessment_plan_email(user, subject, message)
+        except Exception:
+            # Never re-raise: the plan is already submitted and valid.
+            frappe.log_error(
+                title=f"Assessment Plan notification failed ({doc.name})",
+                message=frappe.get_traceback(),
+            )
+
+
+def _assessment_plan_subject(doc):
+    label = doc.assessment_name or doc.assessment_group or doc.name
+    return f"New Assessment Scheduled: {label}"
+
+
+def _plan_students(student_group):
+    """Active students of the plan's group, as Student names."""
+
+    return frappe.get_all(
+        "Student Group Student",
+        filters={"parent": student_group, "active": 1},
+        pluck="student",
+    )
+
+
+def _student_group_label(group):
+    return frappe.db.get_value("Student Group", group, "student_group_name") or group
+
+
+def _already_notified(user, document_name):
+    return bool(
+        frappe.db.exists(
+            "Notification Log",
+            {
+                "for_user": user,
+                "type": NOTIFICATION_TYPE,
+                "document_type": "Assessment Plan",
+                "document_name": document_name,
+            },
+        )
+    )
+
+
+def _assessment_plan_message(doc):
+    """Plain-text summary built from the fields actually on the plan.
+
+    The Assessment Plan DocType has no validity / end-date field, so no
+    fabricated date is ever shown - only the real schedule information.
+    """
+
+    group_label = _student_group_label(doc.student_group)
+
+    lines = [
+        "A new assessment has been scheduled for your student group.",
+        "",
+        f"- Assessment: {doc.assessment_name or doc.assessment_group or doc.name}",
+    ]
+
+    if doc.course:
+        lines.append(f"- Course: {doc.course}")
+
+    if group_label:
+        lines.append(f"- Student Group: {group_label}")
+
+    if doc.assessment_group:
+        lines.append(f"- Assessment Group: {doc.assessment_group}")
+
+    if doc.schedule_date:
+        lines.append(f"- Scheduled Date: {formatdate(doc.schedule_date)}")
+
+    if doc.from_time and doc.to_time:
+        lines.append(f"- Time: {doc.from_time} to {doc.to_time}")
+
+    if doc.room:
+        lines.append(f"- Room: {doc.room}")
+
+    if doc.maximum_assessment_score:
+        lines.append(f"- Maximum Score: {flt(doc.maximum_assessment_score)}")
+
+    if doc.academic_year:
+        lines.append(f"- Academic Year: {doc.academic_year}")
+
+    if doc.academic_term:
+        lines.append(f"- Academic Term: {doc.academic_term}")
+
+    if doc.examiner:
+        lines.append(f"- Examiner: {doc.examiner_name or doc.examiner}")
+
+    return "\n".join(lines)
+
+
+def _send_assessment_plan_email(user, subject, message):
+    """Queue one email for a student user; failures propagate to the
+    caller's per-student try/except (logged, never fatal)."""
+
+    if not user or user in ("Guest", "Administrator"):
+        return
+
+    frappe.sendmail(
+        recipients=[user],
+        subject=subject,
+        message=message.replace("\n", "<br>"),
     )
 
 

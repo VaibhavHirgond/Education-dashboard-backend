@@ -6,3 +6,4 @@
 # Patches added in this section will be executed after doctypes are migrated
 backend_custom_app.patches.setup_education_access
 backend_custom_app.patches.instructor_desk_access
+backend_custom_app.patches.instructor_assessment_plan_access

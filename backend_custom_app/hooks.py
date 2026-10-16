@@ -166,6 +166,9 @@ doc_events = {
     "Assessment Result": {
         "on_submit": "backend_custom_app.api.student_notifications.assessment_result_submitted"
     },
+    "Assessment Plan": {
+        "on_submit": "backend_custom_app.api.student_notifications.assessment_plan_submitted"
+    },
 }
 
 scheduler_events = {
