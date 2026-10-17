@@ -7,3 +7,4 @@
 backend_custom_app.patches.setup_education_access
 backend_custom_app.patches.instructor_desk_access
 backend_custom_app.patches.instructor_assessment_plan_access
+backend_custom_app.patches.instructor_course_schedule_access

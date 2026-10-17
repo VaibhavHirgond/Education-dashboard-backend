@@ -151,6 +151,13 @@ has_permission = {
 # 	}
 # }
 
+# Post-login redirect: send student-portal accounts to /student-portal
+# (see backend_custom_app.api.login_redirect for details). Runs through
+# LoginManager's on_login trigger - no Frappe core file is modified.
+on_login = [
+    "backend_custom_app.api.login_redirect.redirect_student_after_login",
+]
+
 doc_events = {
     "Payment Entry": {
         "on_submit": "backend_custom_app.api.payment.payment_entry_submitted"
@@ -234,7 +241,13 @@ scheduler_events = {
 # Request Events
 # ----------------
 # before_request = ["backend_custom_app.utils.before_request"]
-# after_request = ["backend_custom_app.utils.after_request"]
+# Rewrite the login response so student accounts always land on the
+# Student Portal (set_user_info's get_default_path() branch for Website
+# Users resolves to /app/pwa-frappe -> /desk/pwa-frappe). See
+# backend_custom_app.api.login_redirect for details.
+after_request = [
+    "backend_custom_app.api.login_redirect.rewrite_student_login_response",
+]
 
 # Job Events
 # ----------
