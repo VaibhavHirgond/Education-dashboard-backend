@@ -19,8 +19,8 @@ Rules:
   * A non-staff user whose login carries the Student role or is linked to
     an active Student record (``Student.user`` match) is sent to the
     Student Portal at ``origin + /student-portal#/``.
-  * Administrators, instructors and other staff keep their existing
-    redirect (Role home_page / Portal Settings / ``/desk``).
+  * Users with the Education Manager role use that role's configured
+    ``home_page``. Other staff keep their existing redirect.
   * Saved or requested redirects (``redirect_to``, ``?redirect-to=``,
     ``localStorage.last_visited``) are never evaluated for students, so a
     poisoned value cannot bounce them to ``/desk`` / ``/app`` / ``/login``
@@ -57,7 +57,7 @@ BLOCKED_STUDENT_PATHS = ("/desk", "/app", "/login")
 
 
 def redirect_student_after_login(login_manager=None):
-	"""Set the post-login home page for student-portal accounts."""
+	"""Resolve role-specific staff homes and student-portal homes."""
 
 	user = (
 		getattr(login_manager, "user", None)
@@ -67,14 +67,20 @@ def redirect_student_after_login(login_manager=None):
 	if not user or user == "Guest":
 		return
 
-	# Staff (Administrator / System Manager / Education Manager /
-	# Academics User) always keep their desk redirect.
+	roles = set(frappe.get_roles(user))
+	if "Education Manager" in roles:
+		home_page = frappe.db.get_value("Role", "Education Manager", "home_page")
+		if home_page:
+			frappe.local.flags.home_page = home_page
+			return
+
+	# Other staff keep Frappe's normal role / portal home-page resolution.
 	if is_staff(user):
 		return
 
 	# A valid linked Student record or the bare Student role is enough;
 	# instructors and other staff never take this branch.
-	if "Student" in set(frappe.get_roles(user)) or get_student_record(user):
+	if "Student" in roles or get_student_record(user):
 		frappe.local.flags.home_page = STUDENT_PORTAL_HOME
 		return
 
