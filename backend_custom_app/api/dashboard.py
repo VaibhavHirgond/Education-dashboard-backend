@@ -19,7 +19,7 @@ linked Employee are simply not counted as present or absent.
 from __future__ import annotations
 
 import frappe
-from frappe.utils import add_months, flt, getdate, nowdate
+from frappe.utils import add_months, flt, get_first_day, getdate, nowdate
 
 from backend_custom_app.api.permissions import require_staff
 
@@ -52,13 +52,13 @@ def get_admin_dashboard(
 ):
     """Return aggregated admin dashboard metrics for one reporting period.
 
-    ``academic_year`` is optional; when omitted the period comes from
-    Education Settings (current academic year), falling back to the
-    academic year containing today, then to the calendar year.
+    When no range is supplied the period defaults to the 1st of the
+    current month through today, so the default view is always a live
+    window instead of a whole academic year.
 
-    ``start_date`` / ``end_date`` (inclusive) override the academic-year
-    period when both are supplied; they must be valid dates with
-    start_date <= end_date.
+    ``academic_year`` selects an academic-year period explicitly.
+    ``start_date`` / ``end_date`` (inclusive) override everything when
+    both are supplied; they must be valid dates with start_date <= end_date.
     """
     require_staff()
 
@@ -129,33 +129,36 @@ def _resolve_period(
 
     requested = (academic_year or "").strip()
 
-    if requested:
-        row = frappe.db.get_value(
-            "Academic Year",
-            requested,
-            ["name", "year_start_date", "year_end_date"],
-            as_dict=True,
-        )
-        if not row:
-            frappe.throw(
-                f"Academic year {requested} was not found.",
-                frappe.ValidationError,
-            )
-        source = "requested"
-    else:
-        row = _current_academic_year_row()
-        source = "education_settings" if row else None
-
-    if row:
-        start = getdate(row.year_start_date) if row.year_start_date else None
-        end = getdate(row.year_end_date) if row.year_end_date else None
-        name = row.name
-    else:
+    if not requested:
+        # Default reporting period: the 1st of the current month up to
+        # today. The date inputs on the dashboard are pre-filled with the
+        # same window, so what the user sees always matches this period.
         today = getdate(nowdate())
-        name = str(today.year)
-        start = today.replace(month=1, day=1)
-        end = today.replace(month=12, day=31)
-        source = "calendar_year"
+
+        return {
+            "academic_year": None,
+            "from_date": get_first_day(today).isoformat(),
+            "to_date": today.isoformat(),
+            "label": "Current month",
+            "source": "default",
+        }
+
+    row = frappe.db.get_value(
+        "Academic Year",
+        requested,
+        ["name", "year_start_date", "year_end_date"],
+        as_dict=True,
+    )
+
+    if not row:
+        frappe.throw(
+            f"Academic year {requested} was not found.",
+            frappe.ValidationError,
+        )
+
+    start = getdate(row.year_start_date) if row.year_start_date else None
+    end = getdate(row.year_end_date) if row.year_end_date else None
+    name = row.name
 
     if not start or not end or start > end:
         frappe.throw(
@@ -164,40 +167,13 @@ def _resolve_period(
             frappe.ValidationError,
         )
 
-    label = (
-        f"Academic Year {name}" if source != "calendar_year" else f"Calendar Year {name}"
-    )
-
     return {
-        "academic_year": name if source != "calendar_year" else None,
+        "academic_year": name,
         "from_date": start.isoformat(),
         "to_date": end.isoformat(),
-        "label": label,
-        "source": source,
+        "label": f"Academic Year {name}",
+        "source": "requested",
     }
-
-
-def _current_academic_year_row():
-    name = frappe.db.get_single_value("Education Settings", "current_academic_year")
-    if not name:
-        today = getdate(nowdate())
-        name = frappe.db.get_value(
-            "Academic Year",
-            {
-                "year_start_date": ["<=", today],
-                "year_end_date": [">=", today],
-            },
-            "name",
-        )
-    if not name:
-        return None
-
-    return frappe.db.get_value(
-        "Academic Year",
-        name,
-        ["name", "year_start_date", "year_end_date"],
-        as_dict=True,
-    )
 
 
 # ---------------------------------------------------------------------------

@@ -12,6 +12,7 @@ from frappe.utils import (
 )
 
 from backend_custom_app.api.permissions import (
+    get_instructor_courses,
     get_instructor_groups,
     get_instructor_record,
     get_instructor_students,
@@ -35,13 +36,18 @@ def _existing_fields(doctype, fields):
 
     This keeps the dashboard APIs safe when optional fields
     differ between Education versions or customizations.
+
+    Standard columns (name, owner, creation, ...) are not DocFields, so
+    they are checked against ``meta.default_fields`` - otherwise passing
+    ``name`` here would silently drop it and every row would come back
+    without an id.
     """
     meta = frappe.get_meta(doctype)
 
     existing = []
 
     for field in fields:
-        if meta.has_field(field):
+        if field in meta.default_fields or meta.has_field(field):
             existing.append(field)
 
     return existing
@@ -86,22 +92,28 @@ def get_dashboard(start_date=None, end_date=None):
 
     require_education_scope()
 
-    start, end = _normalize_dashboard_dates(start_date, end_date)
-
     if is_student_portal():
-        return _student_dashboard(start, end)
+        return _student_dashboard(*_normalize_dashboard_dates(start_date, end_date))
 
     if is_instructor_portal():
-        return _instructor_dashboard(start, end)
+        return _instructor_dashboard(*_normalize_dashboard_dates(start_date, end_date))
 
-    return _admin_dashboard(start, end)
+    # Staff dashboard: default to the 1st of the current month up to
+    # today so the attendance figures always describe a real range
+    # instead of "everything that has ever been recorded".
+    if not start_date and not end_date:
+        start_date, end_date = get_first_day(nowdate()), nowdate()
+
+    return _admin_dashboard(*_normalize_dashboard_dates(start_date, end_date))
 
 
 # =========================================================
 # INSTRUCTOR DASHBOARD
 #
-# Built only from the Student Groups that list this Instructor in
-# their ``instructors`` child table - never from the whole school.
+# Students and groups come only from the Student Groups that list this
+# Instructor in their ``instructors`` child table - never from the whole
+# school - and courses come from the assignments the Administrator
+# recorded on this Instructor's own ``instructor_log`` table.
 # =========================================================
 
 
@@ -112,9 +124,11 @@ def _instructor_dashboard(start_date=None, end_date=None):
     students = sorted(set(get_instructor_students()))
 
     start, end = _normalize_dashboard_dates(start_date, end_date)
-    date_range = {"start_date": start.isoformat(), "end_date": end.isoformat()}
 
     group_cards = []
+    groups_by_course = {}
+    groups_without_course = {}
+    groups_by_program = {}
 
     if groups:
         for group in frappe.get_all(
@@ -130,23 +144,34 @@ def _instructor_dashboard(start_date=None, end_date=None):
                 "academic_term",
             ],
         ):
-            group_cards.append(
-                {
-                    "id": group.name,
-                    "name": group.student_group_name or group.name,
-                    "program": group.program or "",
-                    "course": frappe.db.get_value("Course", group.course, "course_name")
-                    or group.course
-                    or "",
-                    "batch": group.batch or "",
-                    "academicYear": group.academic_year or "",
-                    "academicTerm": group.academic_term or "",
-                    "studentCount": frappe.db.count(
-                        "Student Group Student",
-                        {"parent": group.name, "parenttype": "Student Group"},
-                    ),
-                }
-            )
+            group_card = {
+                "id": group.name,
+                "name": group.student_group_name or group.name,
+                "program": group.program or "",
+                "course": frappe.db.get_value("Course", group.course, "course_name")
+                or group.course
+                or "",
+                "batch": group.batch or "",
+                "academicYear": group.academic_year or "",
+                "academicTerm": group.academic_term or "",
+                "studentCount": frappe.db.count(
+                    "Student Group Student",
+                    {"parent": group.name, "parenttype": "Student Group"},
+                ),
+            }
+            group_cards.append(group_card)
+
+            # Lookups used to attach an Instructor Log assignment to the
+            # class that actually runs it. Every entry comes from the
+            # groups this instructor teaches, never from the whole school.
+            if group.course and group.course not in groups_by_course:
+                groups_by_course[group.course] = group_card
+
+            if group.program:
+                if not group.course:
+                    groups_without_course.setdefault(group.program, group_card)
+
+                groups_by_program.setdefault(group.program, group_card)
 
     student_cards = []
 
@@ -185,19 +210,75 @@ def _instructor_dashboard(start_date=None, end_date=None):
     course_cards = []
     seen_courses = set()
 
-    for group in group_cards:
-        course_name = group.get("course") or ""
+    def _add_course(course_name, group_name, student_count, program="", batch=""):
+        if not course_name or course_name in seen_courses:
+            return
 
-        if course_name and course_name not in seen_courses:
-            seen_courses.add(course_name)
-            course_cards.append(
-                {
-                    "name": course_name,
-                    "group": group.get("name") or "",
-                    "studentCount": group.get("studentCount", 0),
-                    "program": group.get("program") or "",
-                    "batch": group.get("batch") or "",
-                }
+        seen_courses.add(course_name)
+
+        course_cards.append(
+            {
+                "name": course_name,
+                "group": group_name or "",
+                "studentCount": student_count or 0,
+                "program": program or "",
+                "batch": batch or "",
+            }
+        )
+
+    # "My Courses" is read from the Instructor Log rows the Administrator
+    # wrote on this Instructor document - the actual assignment - and never
+    # from another instructor's records or from the whole course list.
+    assigned_courses = _instructor_log_courses(
+        record,
+        group_cards,
+        groups_by_course,
+        groups_without_course,
+        groups_by_program,
+    )
+
+    for assigned in assigned_courses:
+        _add_course(
+            assigned["name"],
+            assigned["group"],
+            assigned["studentCount"],
+            assigned["program"],
+            assigned["batch"],
+        )
+
+    # Fallback: instructors whose Instructor Log carries no course row yet
+    # still see the courses of the groups they actually teach.
+    if not course_cards:
+        for group in group_cards:
+            course_name = group.get("course") or ""
+            student_count = group.get("studentCount", 0)
+
+            # Batch / activity based groups never set a course, so fall back
+            # to the curriculum of the program the group belongs to - the
+            # instructor still teaches those courses in that class.
+            if not course_name:
+                for program_course in frappe.get_all(
+                    "Program Course",
+                    filters={"parent": group.get("program") or "__none__"},
+                    fields=["course", "course_name"],
+                    order_by="idx asc",
+                ):
+                    _add_course(
+                        program_course.course_name or program_course.course,
+                        group.get("name") or "",
+                        student_count,
+                        group.get("program") or "",
+                        group.get("batch") or "",
+                    )
+
+                continue
+
+            _add_course(
+                course_name,
+                group.get("name") or "",
+                student_count,
+                group.get("program") or "",
+                group.get("batch") or "",
             )
 
     def _session_rows(filters, limit):
@@ -227,7 +308,8 @@ def _instructor_dashboard(start_date=None, end_date=None):
                 "date": row.schedule_date.isoformat() if row.schedule_date else "",
                 "fromTime": str(row.from_time) if row.from_time else "",
                 "toTime": str(row.to_time) if row.to_time else "",
-                "isToday": bool(row.schedule_date) and str(row.schedule_date) == start.isoformat(),
+                "isToday": bool(row.schedule_date)
+                and getdate(row.schedule_date) == getdate(nowdate()),
             }
             for row in rows
         ]
@@ -236,9 +318,13 @@ def _instructor_dashboard(start_date=None, end_date=None):
 
     session_filters = {"instructor": instructor_name, "schedule_date": ["between", [start, end]]}
     scheduled_sessions = _session_rows(session_filters, 50)
-    today_sessions = [session for session in scheduled_sessions if session["date"] == start.isoformat()]
+
+    # The panel shows every class inside the selected range: without a
+    # filter that range is a single day (today), with a filter the footer
+    # labels the list as "filtered schedule", so both stay honest.
+    today_sessions = scheduled_sessions
     upcoming_sessions = [
-        session for session in scheduled_sessions if session["date"] > start.isoformat()
+        session for session in scheduled_sessions if session["date"] > nowdate()
     ]
 
     pending_leaves = []
@@ -276,7 +362,12 @@ def _instructor_dashboard(start_date=None, end_date=None):
     attendance_stats = {"total": 0, "present": 0, "absent": 0, "leave": 0, "percentage": 0, "students": 0}
 
     if students:
-        attendance_stats = _attendance_stats({"student": ["in", students]})
+        attendance_stats = _attendance_stats(
+            {
+                "student": ["in", students],
+                "date": ["between", [start, end]],
+            }
+        )
 
     attendance_stats.update(
         _instructor_attendance_today_and_trend(
@@ -308,6 +399,73 @@ def _instructor_dashboard(start_date=None, end_date=None):
         "attendance": attendance_stats,
         "filters": {"start_date": start.isoformat(), "end_date": end.isoformat()},
     }
+
+
+def _instructor_log_courses(
+    record,
+    group_cards,
+    groups_by_course,
+    groups_without_course,
+    groups_by_program,
+):
+    """Course cards read from this Instructor's own ``Instructor Log`` rows.
+
+    The Administrator assigns courses (AI, Programming Fundamentals, ...)
+    on the ``instructor_log`` child table of the Instructor document, one
+    row per academic year / program / course. Those rows are the actual
+    assignment, so they - and not the Student Groups, which often carry no
+    course at all - decide what "My Courses" shows.
+
+    Only rows whose ``parent`` is this instructor are read, every course
+    code is emitted once (the same course may be assigned for several
+    programs or years) and the class shown on the card, if any, is picked
+    from the groups this instructor teaches.
+    """
+
+    if not record:
+        return []
+
+    rows = frappe.get_all(
+        "Instructor Log",
+        filters={"parenttype": "Instructor", "parent": record.name},
+        fields=["course", "program", "student_group", "idx"],
+        order_by="idx asc",
+        limit_page_length=0,
+    )
+
+    groups_by_id = {card.get("id"): card for card in group_cards}
+
+    courses = []
+    seen = set()
+
+    for row in rows:
+        course_code = row.course or ""
+
+        if not course_code or course_code in seen:
+            continue
+
+        seen.add(course_code)
+
+        group_card = (
+            groups_by_id.get(row.student_group or "")
+            or groups_by_course.get(course_code)
+            or groups_without_course.get(row.program or "")
+            or groups_by_program.get(row.program or "")
+            or {}
+        )
+
+        courses.append(
+            {
+                "name": frappe.db.get_value("Course", course_code, "course_name")
+                or course_code,
+                "group": group_card.get("name") or "",
+                "studentCount": group_card.get("studentCount", 0),
+                "program": group_card.get("program") or row.program or "",
+                "batch": group_card.get("batch") or "",
+            }
+        )
+
+    return courses
 
 
 def _instructor_attendance_today_and_trend(
@@ -732,6 +890,11 @@ def _student_dashboard(start_date=None, end_date=None):
 
 def _admin_dashboard(start_date=None, end_date=None):
 
+    # Keep the requested range in its own names: the monthly fee loop
+    # below reuses ``start_date`` / ``end_date`` as its own iteration
+    # variables.
+    range_start, range_end = _normalize_dashboard_dates(start_date, end_date)
+
     # ---------------------------------------------------------
     # Total Students
     # ---------------------------------------------------------
@@ -883,10 +1046,12 @@ def _admin_dashboard(start_date=None, end_date=None):
         })
 
     # ---------------------------------------------------------
-    # Attendance statistics (school wide)
+    # Attendance statistics (school wide, inside the date range)
     # ---------------------------------------------------------
 
-    attendance_stats = _attendance_stats()
+    attendance_stats = _attendance_stats(
+        {"date": ["between", [range_start, range_end]]}
+    )
 
     # ---------------------------------------------------------
     # Dashboard Response
@@ -902,6 +1067,10 @@ def _admin_dashboard(start_date=None, end_date=None):
         "recent_payments": recent_payments,
         "monthly_fees": monthly_fees,
         "attendance": attendance_stats,
+        "filters": {
+            "start_date": range_start.isoformat(),
+            "end_date": range_end.isoformat(),
+        },
     }
 
 
@@ -1618,10 +1787,12 @@ def get_attendance(payload=None):
 
     if mode in ("admin", "instructor"):
 
+        # branch / standard / division are optional Student fields; a
+        # site without them must not receive filters on missing columns.
         master_filters = {
             key: filters.get(key)
             for key in ("branch", "standard", "division")
-            if filters.get(key)
+            if filters.get(key) and frappe.get_meta("Student").has_field(key)
         }
 
         # Student scoped filters are combined (AND) before they are
@@ -1855,6 +2026,18 @@ def get_courses():
         order_by="creation desc"
     )
 
+    # Instructors only ever see the courses on their own Instructor Log,
+    # exactly like the Course desk list, its Link field searches and the
+    # Course documents themselves. Staff keep the full directory.
+    if is_instructor_portal():
+
+        assigned = set(get_instructor_courses())
+
+        courses = [
+            course for course in courses
+            if (course.get("name") or "") in assigned
+        ]
+
     result = []
 
     for course in courses:
@@ -1989,12 +2172,13 @@ def get_course_schedules(payload=None):
 
         group_sets = []
 
-        if filters.get("branch") or filters.get("standard") or filters.get("division"):
-            student_filters = {
-                key: filters.get(key)
-                for key in ("branch", "standard", "division")
-                if filters.get(key)
-            }
+        student_filters = {
+            key: filters.get(key)
+            for key in ("branch", "standard", "division")
+            if filters.get(key) and frappe.get_meta("Student").has_field(key)
+        }
+
+        if student_filters:
             students = frappe.get_all(
                 "Student",
                 filters=student_filters,

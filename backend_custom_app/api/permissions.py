@@ -237,7 +237,16 @@ def student_name_for_user(user=None):
 
 
 def get_instructor_record(user=None):
-    """Return the Instructor document linked to this user (or None)."""
+    """Return the Instructor document linked to this user (or None).
+
+    More than one Instructor can carry the same ``custom_instructor_email``
+    (duplicates appear when a record is re-created), and the plain lookup
+    otherwise returns whichever row the database happens to read last. That
+    made the portal resolve to an unused duplicate with no student groups,
+    so every dashboard count read zero. The match is therefore ordered by
+    name and, when the email is shared, the record that actually teaches a
+    group wins.
+    """
 
     user = user or frappe.session.user
 
@@ -250,28 +259,56 @@ def get_instructor_record(user=None):
 
     fields = ["name", "instructor_name", "status", "custom_instructor_email"]
 
-    record = frappe.db.get_value(
+    matches = frappe.get_all(
         "Instructor",
-        {"custom_instructor_email": user},
-        fields,
-        as_dict=True,
+        filters={"custom_instructor_email": user},
+        fields=fields,
+        order_by="name asc",
     )
 
-    if not record:
+    if not matches:
         full_name = (frappe.utils.get_fullname(user) or "").strip()
+
         if full_name:
-            record = frappe.db.get_value(
+            matches = frappe.get_all(
                 "Instructor",
-                {"instructor_name": full_name},
-                fields,
-                as_dict=True,
+                filters={"instructor_name": full_name},
+                fields=fields,
+                order_by="name asc",
             )
 
-    if record and record.status and record.status != "Active":
-        record = None
+    active = [
+        row for row in matches if not row.status or row.status == "Active"
+    ]
 
-    frappe.local._education_instructor_record = record
-    return record
+    frappe.local._education_instructor_record = _preferred_instructor_record(
+        active
+    )
+    return frappe.local._education_instructor_record
+
+
+def _preferred_instructor_record(records):
+    """Choose deterministically when several instructors share one email."""
+
+    if not records:
+        return None
+
+    if len(records) == 1:
+        return records[0]
+
+    assigned = set(
+        frappe.get_all(
+            "Student Group Instructor",
+            filters={"instructor": ["in", [row.name for row in records]]},
+            pluck="instructor",
+        )
+    )
+
+    for row in records:
+        if row.name in assigned:
+            return row
+
+    return records[0]
 
 
 def is_instructor_portal(user=None):
@@ -305,7 +342,7 @@ def get_instructor_groups(user=None):
 
     return frappe.get_all(
         "Student Group Instructor",
-        filters={"instructor": record.name},
+        filters={"parenttype": "Student Group", "instructor": record.name},
         pluck="parent",
     )
 
@@ -320,9 +357,96 @@ def get_instructor_students(user=None):
 
     return frappe.get_all(
         "Student Group Student",
-        filters={"parent": ["in", groups]},
+        filters={"parenttype": "Student Group", "parent": ["in", groups]},
         pluck="student",
     )
+
+
+def get_instructor_courses(user=None):
+    """Course names handed to this instructor on their Instructor Log.
+
+    The ``Instructor Log`` child table on the Instructor document is the
+    single source of truth for what an instructor teaches: the
+    Administrator adds one row per (academic year, program, course,
+    group) assignment, and both the dashboard "My Courses" cards and the
+    Course permissions read those rows. Users without a linked
+    instructor record get an empty list.
+    """
+
+    record = get_instructor_record(user)
+
+    if not record:
+        return []
+
+    cache = getattr(frappe.local, "_education_instructor_courses", None)
+    if cache is not None:
+        return cache
+
+    courses = frappe.get_all(
+        "Instructor Log",
+        filters={
+            "parenttype": "Instructor",
+            "parent": record.name,
+            "course": ["is", "set"],
+        },
+        pluck="course",
+        order_by="idx asc",
+    )
+
+    # Keep the log order, drop repeated assignments of one course.
+    frappe.local._education_instructor_courses = list(dict.fromkeys(courses))
+    return frappe.local._education_instructor_courses
+
+
+def course_query_conditions(user, doctype=None):
+    """``permission_query_conditions`` hook entry point for Course.
+
+    Instructors only ever list the courses named on their own Instructor
+    Log. Staff, administrators, students and guests are not instructors,
+    so they fall through to the default, unrestricted Course list.
+    """
+
+    if not is_instructor_portal(user):
+        return ""
+
+    courses = get_instructor_courses(user)
+
+    if not courses:
+        # An instructor whose log carries no course row sees nothing.
+        return "`tabCourse`.`name` = ''"
+
+    values = ", ".join(
+        frappe.db.escape(course, percent=False) for course in courses
+    )
+    return f"`tabCourse`.`name` in ({values})"
+
+
+def course_has_permission(doc, ptype=None, user=None, **kwargs):
+    """``has_permission`` hook entry point for Course (True allows).
+
+    A Frappe controller may only deny, never grant: staff and
+    administrators keep their role permissions untouched, and an
+    instructor keeps read / write / delete on the courses assigned to
+    them while every other course is refused. ``create`` stays with the
+    role permissions - a document being inserted is not assigned to
+    anyone yet, so it cannot be one of the unassigned courses.
+    """
+
+    user = user or frappe.session.user
+
+    if not is_instructor_portal(user):
+        return True
+
+    if ptype == "create":
+        return True
+
+    name = getattr(doc, "name", None)
+
+    # Unsaved desk documents carry a temporary "new-..." name.
+    if not name or str(name).startswith("new-"):
+        return True
+
+    return name in get_instructor_courses(user)
 
 
 # =========================================================

@@ -139,6 +139,17 @@ has_permission = {
     for doctype in RESTRICTED_FOR_STUDENTS
 }
 
+# Course visibility follows the logged-in instructor's Instructor Log
+# assignments: an instructor can only list, search, open and edit the
+# courses the Administrator assigned to them on their own log rows.
+# Staff, administrators, students and guests keep the unrestricted
+# Course permissions above - a controller may only ever deny.
+permission_query_conditions["Course"] = (
+    "backend_custom_app.api.permissions.course_query_conditions"
+)
+
+has_permission["Course"] = "backend_custom_app.api.permissions.course_has_permission"
+
 # Document Events
 # ---------------
 # Hook on document methods and events

@@ -1,9 +1,8 @@
 """Set up the education access model for this site.
 
-Creates the least-privilege "Education User" role, links Branch /
-Standard / Division to the Student master, grants read-only access to
-the records the Students page needs, and seeds the master data used by
-the Branch / Division / Standard filters.
+Creates the least-privilege "Education User" role, grants read-only
+access to the records the Students page needs, and seeds the master
+data used by the Branch / Division / Standard filters.
 
 Everything in here is idempotent: running `bench migrate` again will
 never duplicate records or overwrite existing student data.
@@ -16,40 +15,8 @@ from backend_custom_app.api.permissions import (
     EDUCATION_READ_ONLY_DOCTYPES,
     EDUCATION_USER_ROLE,
 )
-from frappe.custom.doctype.custom_field.custom_field import create_custom_field
 
-# Section shown in the Student form for the academic master links.
-STUDENT_MASTER_FIELDS = (
-    {
-        "fieldname": "education_masters_section",
-        "fieldtype": "Section Break",
-        "label": "Academic Masters",
-        "insert_after": "student_applicant",
-    },
-    {
-        "fieldname": "branch",
-        "fieldtype": "Link",
-        "label": "Branch",
-        "options": "Branch",
-        "insert_after": "education_masters_section",
-    },
-    {
-        "fieldname": "standard",
-        "fieldtype": "Link",
-        "label": "Standard",
-        "options": "Standard",
-        "insert_after": "branch",
-    },
-    {
-        "fieldname": "division",
-        "fieldtype": "Link",
-        "label": "Division",
-        "options": "Division",
-        "insert_after": "standard",
-    },
-)
-
-# Demo master data so the new filters are usable out of the box.
+# Demo master data so the filters are usable out of the box.
 BRANCHES = ("Computer Science", "Information Technology")
 
 STANDARDS = ("First Year", "Second Year")
@@ -63,7 +30,6 @@ DIVISIONS = (
 
 def execute():
     _ensure_role()
-    _ensure_student_master_fields()
     _ensure_read_permissions()
     _seed_masters()
     _replace_default_signup_access()
@@ -87,18 +53,6 @@ def _ensure_role():
     )
     role.flags.ignore_permissions = True
     role.insert(ignore_permissions=True)
-
-
-def _ensure_student_master_fields():
-    """Add the Branch / Standard / Division Link fields on Student."""
-
-    for field in STUDENT_MASTER_FIELDS:
-        create_custom_field(
-            "Student",
-            field,
-            ignore_validate=False,
-            is_system_generated=False,
-        )
 
 
 def _ensure_read_permissions():
@@ -152,8 +106,6 @@ def _seed_masters():
             },
         )
 
-    _assign_students_to_divisions()
-
 
 def _insert_named(doctype, name_field, values):
     if frappe.db.exists(doctype, values[name_field]):
@@ -162,48 +114,6 @@ def _insert_named(doctype, name_field, values):
     doc = frappe.get_doc({"doctype": doctype, **values})
     doc.flags.ignore_permissions = True
     doc.insert(ignore_permissions=True)
-
-
-def _assign_students_to_divisions():
-    """Fill empty Branch / Standard / Division values on existing students.
-
-    Existing values are never touched and `modified` is left unchanged so
-    current student data is preserved.
-    """
-
-    divisions = frappe.get_all(
-        "Division",
-        fields=["name", "branch", "standard"],
-        order_by="name",
-    )
-
-    if not divisions:
-        return
-
-    students = frappe.get_all(
-        "Student",
-        fields=["name", "branch", "standard", "division"],
-        order_by="name",
-    )
-
-    for index, student in enumerate(students):
-        division = divisions[index % len(divisions)]
-        values = {}
-
-        if not student.branch:
-            values["branch"] = division.branch
-        if not student.standard:
-            values["standard"] = division.standard
-        if not student.division:
-            values["division"] = division.name
-
-        if values:
-            frappe.db.set_value(
-                "Student",
-                student.name,
-                values,
-                update_modified=False,
-            )
 
 
 def _replace_default_signup_access():

@@ -80,10 +80,11 @@ frappe.pages['education-dashboard'].on_page_load = function (wrapper) {
             }
 
             frame.src =
-                '/assets/frontend_custom_app/frontend/index.html#' + route;
+                '/assets/frontend_custom_app/frontend/index.html?_=' + Date.now() + '#' + route;
         } catch (error) {
             console.error('Unable to load the correct dashboard:', error);
-            frame.src = '/assets/frontend_custom_app/frontend/index.html#/';
+            frame.src =
+                '/assets/frontend_custom_app/frontend/index.html?_=' + Date.now() + '#/';
         }
     }
 
