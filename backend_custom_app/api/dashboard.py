@@ -389,11 +389,13 @@ def _attendance_summary(period: dict) -> dict:
     row = frappe.db.sql(
         """
         SELECT COUNT(*) AS recorded_days,
-               COALESCE(SUM(present), 0) AS present_days
+               COALESCE(SUM(present), 0) AS present_days,
+               COALESCE(SUM(absent), 0) AS absent_days
         FROM (
             SELECT sa.student,
                    sa.date,
-                   MAX(CASE WHEN sa.status = 'Present' THEN 1 ELSE 0 END) AS present
+                   MAX(CASE WHEN sa.status = 'Present' THEN 1 ELSE 0 END) AS present,
+                   MAX(CASE WHEN sa.status = 'Absent' THEN 1 ELSE 0 END) AS absent
             FROM `tabStudent Attendance` sa
             WHERE sa.docstatus = 1
               AND sa.date BETWEEN %s AND %s
@@ -419,11 +421,13 @@ def _attendance_summary(period: dict) -> dict:
 
     recorded = int(row.recorded_days or 0)
     present = int(row.present_days or 0)
+    absent = int(row.absent_days or 0)
     percentage = round((present / recorded) * 100, 1) if recorded else None
 
     return {
         "percentage": percentage,
         "present_days": present,
+        "absent_days": absent,
         "recorded_days": recorded,
         "absent_records": int(absence.absent_records or 0),
         "absent_students": int(absence.absent_students or 0),
@@ -436,11 +440,13 @@ def _attendance_monthly(period: dict) -> list:
         """
         SELECT DATE_FORMAT(daily.d, '%%Y-%%m') AS ym,
                COUNT(*) AS recorded_days,
-               COALESCE(SUM(daily.present), 0) AS present_days
+               COALESCE(SUM(daily.present), 0) AS present_days,
+               COALESCE(SUM(daily.absent), 0) AS absent_days
         FROM (
             SELECT sa.student,
                    sa.date AS d,
-                   MAX(CASE WHEN sa.status = 'Present' THEN 1 ELSE 0 END) AS present
+                   MAX(CASE WHEN sa.status = 'Present' THEN 1 ELSE 0 END) AS present,
+                   MAX(CASE WHEN sa.status = 'Absent' THEN 1 ELSE 0 END) AS absent
             FROM `tabStudent Attendance` sa
             WHERE sa.docstatus = 1
               AND sa.date BETWEEN %s AND %s
@@ -456,6 +462,7 @@ def _attendance_monthly(period: dict) -> list:
         row.ym: {
             "recorded_days": int(row.recorded_days or 0),
             "present_days": int(row.present_days or 0),
+            "absent_days": int(row.absent_days or 0),
         }
         for row in rows
     }
@@ -463,10 +470,11 @@ def _attendance_monthly(period: dict) -> list:
     series = []
     for month in _iter_months(period["from_date"], period["to_date"]):
         entry = by_month.get(
-            month, {"recorded_days": 0, "present_days": 0}
+            month, {"recorded_days": 0, "present_days": 0, "absent_days": 0}
         )
         recorded = entry["recorded_days"]
         present = entry["present_days"]
+        absent = entry["absent_days"]
         percentage = round((present / recorded) * 100, 1) if recorded else None
 
         series.append(
@@ -476,6 +484,7 @@ def _attendance_monthly(period: dict) -> list:
                 "short": _month_short(month),
                 "percentage": percentage,
                 "present_days": present,
+                "absent_days": absent,
                 "recorded_days": recorded,
             }
         )
