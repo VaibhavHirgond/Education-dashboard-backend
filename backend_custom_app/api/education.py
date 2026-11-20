@@ -2556,6 +2556,33 @@ def get_grades():
 
     student = record.name
 
+    groups = frappe.get_all(
+        "Student Group Student",
+        filters={"student": student},
+        pluck="parent",
+    )
+
+    standard = ""
+
+    if groups:
+        group_students = frappe.get_all(
+            "Student Group Student",
+            filters={"parent": ["in", groups], "student": student},
+            fields=["student"],
+            limit_page_length=1,
+        )
+
+        if group_students:
+            standard = (
+                frappe.db.get_value(
+                    "Student", group_students[0].student, "standard"
+                )
+                or ""
+            )
+
+    if not standard:
+        standard = frappe.db.get_value("Student", student, "standard") or ""
+
     # ---------------------------------------------------------
     # Enrolled courses
     # ---------------------------------------------------------
@@ -2604,10 +2631,28 @@ def get_grades():
             "total_score",
             "grade",
             "comment",
+            "creation",
         ],
         order_by="creation desc",
         limit_page_length=100,
     )
+
+    plan_dates = {}
+    for row in rows:
+        if row.assessment_plan and row.assessment_plan not in plan_dates:
+            plan_dates[row.assessment_plan] = frappe.db.get_value(
+                "Assessment Plan", row.assessment_plan, "schedule_date"
+            )
+
+    def _assessment_date(row):
+        value = plan_dates.get(row.assessment_plan)
+
+        if hasattr(value, "isoformat"):
+            value = value.isoformat()
+
+        return str(value or row.creation or "")
+
+    rows = sorted(rows, key=_assessment_date, reverse=True)
 
     for row in rows:
         course_name = frappe.db.get_value("Course", row.course, "course_name") or (
@@ -2621,6 +2666,18 @@ def get_grades():
                     "Assessment Plan", row.assessment_plan, "assessment_name"
                 )
                 or row.assessment_plan
+            )
+
+        subject_name = course_name
+
+        if not subject_name and row.assessment_plan:
+            plan_course = frappe.db.get_value(
+                "Assessment Plan", row.assessment_plan, "course"
+            )
+            subject_name = (
+                frappe.db.get_value("Course", plan_course, "course_name")
+                or plan_course
+                or ""
             )
 
         details = [
@@ -2647,6 +2704,7 @@ def get_grades():
             "id": row.name,
             "assessment": plan_name,
             "course": course_name,
+            "subject": subject_name,
             "program": row.program or "",
             "academicYear": row.academic_year or "",
             "academicTerm": row.academic_term or "",
@@ -2658,12 +2716,14 @@ def get_grades():
             "details": details,
         })
 
-    scores = [row["totalScore"] for row in results if row.get("totalScore")]
+    latest = results[0] if results else None
+    latest_score = latest["totalScore"] if latest else 0
 
     return {
         "mode": "student",
         "student": student,
         "studentName": record.student_name or "",
+        "standard": standard,
         "program": enrollment[0].program if enrollment else "",
         "academicYear": enrollment[0].academic_year if enrollment else "",
         "academicTerm": enrollment[0].academic_term if enrollment else "",
@@ -2671,8 +2731,9 @@ def get_grades():
         "results": results,
         "summary": {
             "total": len(results),
-            "averageScore": round(sum(scores) / len(scores), 2) if scores else 0,
-            "latestGrade": results[0]["grade"] if results else "",
+            "averageScore": latest_score,
+            "latestScore": latest_score,
+            "latestGrade": latest["grade"] if latest else "",
         },
     }
 
