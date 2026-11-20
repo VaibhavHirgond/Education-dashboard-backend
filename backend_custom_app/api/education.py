@@ -1359,6 +1359,7 @@ def _fees_payload(student=None, filters=None):
     total_outstanding = 0
     paid_invoices = 0
     unpaid_invoices = 0
+    partial_invoices = 0
 
     # ---------------------------------------------------------
     # Process Each Invoice
@@ -1415,6 +1416,11 @@ def _fees_payload(student=None, filters=None):
 
             payment_status = "Paid"
             paid_invoices += 1
+
+        elif paid_amount > 0:
+
+            payment_status = "Partially Paid"
+            partial_invoices += 1
 
         else:
 
@@ -1474,6 +1480,9 @@ def _fees_payload(student=None, filters=None):
             total_outstanding = sum(row["outstandingAmount"] for row in fees)
             paid_invoices = sum(1 for row in fees if row["status"] == "Paid")
             unpaid_invoices = sum(1 for row in fees if row["status"] == "Unpaid")
+            partial_invoices = sum(
+                1 for row in fees if row["status"] == "Partially Paid"
+            )
 
     # ---------------------------------------------------------
     # Fees Response
@@ -1485,6 +1494,8 @@ def _fees_payload(student=None, filters=None):
         "total_outstanding": total_outstanding,
         "paid_invoices": paid_invoices,
         "unpaid_invoices": unpaid_invoices,
+        "partial_invoices": partial_invoices,
+        "balance_due_invoices": unpaid_invoices + partial_invoices,
         "fees": fees,
     }
 

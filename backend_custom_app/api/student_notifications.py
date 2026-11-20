@@ -443,29 +443,154 @@ def _send_assessment_plan_email(user, subject, message):
     )
 
 
-def payment_entry_submitted(doc, invoice):
-    """Notify only for a submitted receipt against a submitted invoice."""
+def _fee_currency(doc):
+    return (
+        doc.get("currency")
+        or frappe.db.get_value("Company", doc.get("company"), "default_currency")
+        or ""
+    )
 
+
+def _fee_type(invoice_name):
+    return (
+        frappe.db.get_value(
+            "Sales Invoice Item",
+            {"parent": invoice_name},
+            "item_name",
+        )
+        or "Fee"
+    )
+
+
+def _fee_amount(value, currency=""):
+    amount = f"{flt(value):,.2f}"
+    return f"{currency} {amount}" if currency else amount
+
+
+def _fee_status(grand_total, outstanding_amount):
+    if flt(outstanding_amount) <= 0:
+        return "Paid"
+    if flt(grand_total) - flt(outstanding_amount) > 0:
+        return "Partially Paid"
+    return "Unpaid"
+
+
+def sales_invoice_submitted(doc, method=None):
+    if doc.docstatus != 1 or not doc.student:
+        return
+
+    grand_total = flt(doc.grand_total)
+    outstanding = flt(doc.outstanding_amount)
+    currency = _fee_currency(doc)
+    status = _fee_status(grand_total, outstanding)
+
+    description = "\n".join(
+        [
+            f"Invoice: {doc.name}",
+            f"Fee type: {_fee_type(doc.name)}",
+            f"Total: {_fee_amount(grand_total, currency)}",
+            f"Paid: {_fee_amount(grand_total - outstanding, currency)}",
+            f"Remaining: {_fee_amount(max(outstanding, 0), currency)}",
+            f"Status: {status}",
+            f"Date: {formatdate(doc.posting_date)}",
+        ]
+    )
+
+    create_student_notification(
+        doc.student,
+        "New Fee Invoice Generated",
+        description,
+        "Sales Invoice",
+        doc.name,
+    )
+
+
+def payment_entry_submitted(doc, invoice):
     if doc.docstatus != 1 or invoice.docstatus != 1 or not invoice.student:
         return
 
-    amount = sum(
+    allocated = sum(
         flt(reference.allocated_amount)
         for reference in doc.references
         if reference.reference_doctype == "Sales Invoice"
         and reference.reference_name == invoice.name
     )
-    if amount <= 0:
+    if allocated <= 0:
         return
 
-    currency = invoice.currency or doc.paid_from_account_currency or ""
+    latest = frappe.db.get_value(
+        "Sales Invoice",
+        invoice.name,
+        ["grand_total", "outstanding_amount"],
+        as_dict=True,
+    )
+    if not latest:
+        return
+
+    grand_total = flt(latest.grand_total)
+    outstanding = flt(latest.outstanding_amount)
+    status = _fee_status(grand_total, outstanding)
+    currency = _fee_currency(invoice) or doc.paid_from_account_currency or ""
+    title = "Fee Payment Completed" if status == "Paid" else "Fee Payment Received"
+
+    description = "\n".join(
+        [
+            f"Payment of {_fee_amount(allocated, currency)} was received for invoice {invoice.name}.",
+            f"Fee type: {_fee_type(invoice.name)}",
+            f"Total: {_fee_amount(grand_total, currency)}",
+            f"Paid: {_fee_amount(grand_total - outstanding, currency)}",
+            f"Remaining: {_fee_amount(max(outstanding, 0), currency)}",
+            f"Status: {status}",
+            f"Payment date: {formatdate(doc.posting_date)}",
+        ]
+    )
+
     create_student_notification(
         invoice.student,
-        "Fee payment received",
-        f"A payment of {currency} {amount} was recorded for invoice {invoice.name}.",
+        title,
+        description,
         "Payment Entry",
-        doc.name,
+        f"{doc.name}::{invoice.name}",
     )
+
+
+def sales_invoice_cancelled(doc, method=None):
+    filters = {
+        "app": "education",
+        "document_type": "Sales Invoice",
+        "document_name": doc.name,
+    }
+    if doc.student:
+        user = _student_user(doc.student)
+        if user:
+            filters["for_user"] = user
+    frappe.db.delete("Notification Log", filters)
+
+    names = frappe.get_all(
+        "Notification Log",
+        filters={
+            "app": "education",
+            "document_type": "Payment Entry",
+            "document_name": ("like", f"%::{doc.name}"),
+        },
+        pluck="name",
+    )
+    if names:
+        frappe.db.delete("Notification Log", {"name": ("in", names)})
+
+
+def payment_entry_cancelled(doc, method=None):
+    names = frappe.get_all(
+        "Notification Log",
+        filters={
+            "app": "education",
+            "document_type": "Payment Entry",
+            "document_name": ("like", f"{doc.name}::%"),
+        },
+        pluck="name",
+    )
+    if names:
+        frappe.db.delete("Notification Log", {"name": ("in", names)})
 
 
 def notify_upcoming_classes():

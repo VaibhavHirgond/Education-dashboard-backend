@@ -1,5 +1,6 @@
 import frappe
 import requests
+from frappe.utils import flt
 
 
 def send_whatsapp_message(phone_number, message):
@@ -65,27 +66,40 @@ def payment_entry_submitted(doc, method):
     if doc.payment_type != "Receive":
         return
 
-    # Find the Sales Invoice paid by this Payment Entry
-    invoice_name = None
+    # Find every submitted Sales Invoice allocated to this Payment Entry
+    invoice_names = []
 
     for reference in doc.references:
-        if reference.reference_doctype == "Sales Invoice":
-            invoice_name = reference.reference_name
-            break
+        if (
+            reference.reference_doctype == "Sales Invoice"
+            and reference.reference_name not in invoice_names
+        ):
+            invoice_names.append(reference.reference_name)
 
-    if not invoice_name:
+    if not invoice_names:
         return
 
-    # Get the Sales Invoice
-    invoice = frappe.get_doc("Sales Invoice", invoice_name)
+    from backend_custom_app.api.student_notifications import (
+        payment_entry_submitted as notify_payment_submitted,
+    )
 
-    # Get the Student
+    for invoice_name in invoice_names:
+        invoice = frappe.get_doc("Sales Invoice", invoice_name)
+        if invoice.docstatus == 1 and invoice.student:
+            notify_payment_submitted(doc, invoice)
+
+    # The first allocated invoice drives the existing email/WhatsApp copy.
+    invoice = frappe.get_doc("Sales Invoice", invoice_names[0])
+
     if not invoice.student:
         return
 
-    from backend_custom_app.api.student_notifications import payment_entry_submitted
-
-    payment_entry_submitted(doc, invoice)
+    allocated_amount = sum(
+        flt(reference.allocated_amount)
+        for reference in doc.references
+        if reference.reference_doctype == "Sales Invoice"
+        and reference.reference_name == invoice.name
+    )
 
     student = frappe.get_doc("Student", invoice.student)
 
@@ -105,7 +119,7 @@ def payment_entry_submitted(doc, method):
                 <p>Your fee payment has been successfully received.</p>
 
                 <p>
-                    <b>Amount:</b> ₹{invoice.grand_total}<br>
+                    <b>Amount:</b> ₹{allocated_amount}<br>
                     <b>Sales Invoice:</b> {invoice.name}
                 </p>
 
@@ -126,7 +140,7 @@ def payment_entry_submitted(doc, method):
 
 Your fee payment has been successfully received.
 
-Amount: ₹{invoice.grand_total}
+Amount: ₹{allocated_amount}
 Sales Invoice: {invoice.name}
 
 Thank you."""
@@ -196,7 +210,7 @@ Thank you."""
                 </p>
 
                 <p>
-                    <b>Amount:</b> ₹{invoice.grand_total}<br>
+                    <b>Amount:</b> ₹{allocated_amount}<br>
                     <b>Sales Invoice:</b> {invoice.name}
                 </p>
             """
@@ -213,6 +227,6 @@ Thank you."""
 
 The fee payment for student {student.student_name} has been received.
 
-Amount: ₹{invoice.grand_total}
+Amount: ₹{allocated_amount}
 Sales Invoice: {invoice.name}"""
         )

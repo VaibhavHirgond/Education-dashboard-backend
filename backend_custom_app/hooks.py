@@ -171,7 +171,12 @@ on_login = [
 
 doc_events = {
     "Payment Entry": {
-        "on_submit": "backend_custom_app.api.payment.payment_entry_submitted"
+        "on_submit": "backend_custom_app.api.payment.payment_entry_submitted",
+        "on_cancel": "backend_custom_app.api.student_notifications.payment_entry_cancelled",
+    },
+    "Sales Invoice": {
+        "on_submit": "backend_custom_app.api.student_notifications.sales_invoice_submitted",
+        "on_cancel": "backend_custom_app.api.student_notifications.sales_invoice_cancelled",
     },
     "Student Attendance": {
         "on_submit": "backend_custom_app.api.student_notifications.attendance_submitted",
