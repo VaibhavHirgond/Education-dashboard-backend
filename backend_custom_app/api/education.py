@@ -1,12 +1,18 @@
 import json
+import re
 
 import frappe
+
+from frappe.utils.pdf import get_pdf
 
 from frappe.utils import (
     add_days,
     get_first_day,
     get_last_day,
     add_months,
+    escape_html,
+    flt,
+    formatdate,
     getdate,
     nowdate
 )
@@ -85,6 +91,129 @@ def _student_standard(student, groups=None, program=None):
         standard = frappe.db.get_value("Program", program, "program_name") or program
 
     return standard or ""
+
+
+def _get_student_results(student):
+    results = []
+
+    rows = frappe.get_all(
+        "Assessment Result",
+        filters={"student": student, "docstatus": 1},
+        fields=[
+            "name",
+            "assessment_plan",
+            "course",
+            "program",
+            "academic_year",
+            "academic_term",
+            "student_group",
+            "maximum_score",
+            "total_score",
+            "grade",
+            "comment",
+            "creation",
+        ],
+        order_by="creation desc",
+        limit_page_length=100,
+    )
+
+    plan_dates = {}
+    for row in rows:
+        if row.assessment_plan and row.assessment_plan not in plan_dates:
+            plan_dates[row.assessment_plan] = frappe.db.get_value(
+                "Assessment Plan", row.assessment_plan, "schedule_date"
+            )
+
+    def _assessment_date(row):
+        value = plan_dates.get(row.assessment_plan)
+
+        if hasattr(value, "isoformat"):
+            value = value.isoformat()
+
+        return str(value or row.creation or "")
+
+    rows = sorted(rows, key=_assessment_date, reverse=True)
+
+    for row in rows:
+        course_name = frappe.db.get_value("Course", row.course, "course_name") or (
+            row.course or ""
+        )
+
+        plan_name = ""
+        if row.assessment_plan:
+            plan_name = (
+                frappe.db.get_value(
+                    "Assessment Plan", row.assessment_plan, "assessment_name"
+                )
+                or row.assessment_plan
+            )
+
+        subject_name = course_name
+
+        if not subject_name and row.assessment_plan:
+            plan_course = frappe.db.get_value(
+                "Assessment Plan", row.assessment_plan, "course"
+            )
+            subject_name = (
+                frappe.db.get_value("Course", plan_course, "course_name")
+                or plan_course
+                or ""
+            )
+
+        details = [
+            {
+                "criteria": detail.assessment_criteria or "",
+                "maximumScore": detail.maximum_score or 0,
+                "score": detail.score or 0,
+                "grade": detail.grade or "",
+            }
+            for detail in frappe.get_all(
+                "Assessment Result Detail",
+                filters={"parent": row.name},
+                fields=[
+                    "assessment_criteria",
+                    "maximum_score",
+                    "score",
+                    "grade",
+                ],
+                order_by="idx asc",
+            )
+        ]
+
+        results.append({
+            "id": row.name,
+            "assessmentId": row.assessment_plan or "",
+            "assessment": plan_name,
+            "course": course_name,
+            "subject": subject_name,
+            "program": row.program or "",
+            "academicYear": row.academic_year or "",
+            "academicTerm": row.academic_term or "",
+            "group": row.student_group or "",
+            "maximumScore": row.maximum_score or 0,
+            "totalScore": row.total_score or 0,
+            "grade": row.grade or "",
+            "comment": row.comment or "",
+            "details": details,
+        })
+
+    return results
+
+
+def _student_assessment_rows(student):
+    return frappe.get_all(
+        "Assessment Result",
+        filters={"student": student, "docstatus": 1},
+        fields=["assessment_plan"],
+        order_by="creation desc",
+        limit_page_length=0,
+    )
+
+
+def _assessment_label(plan):
+    if not plan:
+        return ""
+    return str(frappe.db.get_value("Assessment Plan", plan, "assessment_name") or plan)
 
 
 # =========================================================
@@ -2586,6 +2715,7 @@ def get_grades():
             "student": None,
             "results": [],
             "courses": [],
+            "assessments": [],
             "message": (
                 "No student record is linked to this account yet. "
                 "Contact your administrator."
@@ -2633,111 +2763,23 @@ def get_grades():
 
     courses = [course for course in dict.fromkeys(courses) if course]
 
-    # ---------------------------------------------------------
-    # Assessment results (submitted only)
-    # ---------------------------------------------------------
+    results = _get_student_results(student)
 
-    results = []
-
-    rows = frappe.get_all(
-        "Assessment Result",
-        filters={"student": student, "docstatus": 1},
-        fields=[
-            "name",
-            "assessment_plan",
-            "course",
-            "program",
-            "academic_year",
-            "academic_term",
-            "student_group",
-            "maximum_score",
-            "total_score",
-            "grade",
-            "comment",
-            "creation",
-        ],
-        order_by="creation desc",
-        limit_page_length=100,
-    )
-
-    plan_dates = {}
-    for row in rows:
-        if row.assessment_plan and row.assessment_plan not in plan_dates:
-            plan_dates[row.assessment_plan] = frappe.db.get_value(
-                "Assessment Plan", row.assessment_plan, "schedule_date"
-            )
-
-    def _assessment_date(row):
-        value = plan_dates.get(row.assessment_plan)
-
-        if hasattr(value, "isoformat"):
-            value = value.isoformat()
-
-        return str(value or row.creation or "")
-
-    rows = sorted(rows, key=_assessment_date, reverse=True)
-
-    for row in rows:
-        course_name = frappe.db.get_value("Course", row.course, "course_name") or (
-            row.course or ""
-        )
-
-        plan_name = ""
-        if row.assessment_plan:
-            plan_name = (
-                frappe.db.get_value(
-                    "Assessment Plan", row.assessment_plan, "assessment_name"
-                )
-                or row.assessment_plan
-            )
-
-        subject_name = course_name
-
-        if not subject_name and row.assessment_plan:
-            plan_course = frappe.db.get_value(
-                "Assessment Plan", row.assessment_plan, "course"
-            )
-            subject_name = (
-                frappe.db.get_value("Course", plan_course, "course_name")
-                or plan_course
-                or ""
-            )
-
-        details = [
-            {
-                "criteria": detail.assessment_criteria or "",
-                "maximumScore": detail.maximum_score or 0,
-                "score": detail.score or 0,
-                "grade": detail.grade or "",
-            }
-            for detail in frappe.get_all(
-                "Assessment Result Detail",
-                filters={"parent": row.name},
-                fields=[
-                    "assessment_criteria",
-                    "maximum_score",
-                    "score",
-                    "grade",
-                ],
-                order_by="idx asc",
-            )
-        ]
-
-        results.append({
-            "id": row.name,
-            "assessment": plan_name,
-            "course": course_name,
-            "subject": subject_name,
-            "program": row.program or "",
-            "academicYear": row.academic_year or "",
-            "academicTerm": row.academic_term or "",
-            "group": row.student_group or "",
-            "maximumScore": row.maximum_score or 0,
-            "totalScore": row.total_score or 0,
-            "grade": row.grade or "",
-            "comment": row.comment or "",
-            "details": details,
-        })
+    assessments = []
+    assessment_values = []
+    assessment_labels = []
+    for assessment_row in _student_assessment_rows(student):
+        plan = assessment_row.assessment_plan
+        if plan and plan not in assessment_values:
+            assessment_values.append(plan)
+            label = _assessment_label(plan)
+            if label in assessment_labels:
+                label = label + " (" + plan + ")"
+            assessment_labels.append(label)
+            assessments.append({
+                "value": plan,
+                "label": label,
+            })
 
     latest = results[0] if results else None
     latest_score = latest["totalScore"] if latest else 0
@@ -2752,6 +2794,7 @@ def get_grades():
         "academicTerm": enrollment[0].academic_term if enrollment else "",
         "courses": courses,
         "results": results,
+        "assessments": assessments,
         "summary": {
             "total": len(results),
             "averageScore": latest_score,
@@ -2759,6 +2802,221 @@ def get_grades():
             "latestGrade": latest["grade"] if latest else "",
         },
     }
+
+
+def _esc(value):
+    return escape_html(str(value or ""))
+
+
+def _number(value):
+    number = flt(value)
+    if number == int(number):
+        return str(int(number))
+    return str(round(number, 2))
+
+
+def _institute_name():
+    name = frappe.db.get_single_value("Global Defaults", "default_company")
+    if not name:
+        companies = frappe.get_all("Company", pluck="name", limit_page_length=1)
+        if companies:
+            name = companies[0]
+    return name or ""
+
+
+def _marks_card_html(record, rows, assessment_label, standard, academic_year):
+    total_obtained = 0
+    total_maximum = 0
+    for row in rows:
+        total_obtained += flt(row["totalScore"])
+        total_maximum += flt(row["maximumScore"])
+
+    percentage = 0
+    if total_maximum > 0:
+        percentage = total_obtained / total_maximum * 100
+
+    body_rows = ""
+    for index, row in enumerate(rows, start=1):
+        criteria = []
+        for detail in row["details"]:
+            if detail["criteria"]:
+                criteria.append(
+                    _esc(detail["criteria"])
+                    + ": "
+                    + _number(detail["score"])
+                    + "/"
+                    + _number(detail["maximumScore"])
+                )
+
+        if criteria:
+            criteria_html = "<br>".join(criteria)
+        else:
+            criteria_html = "&mdash;"
+
+        body_rows += (
+            "<tr>"
+            "<td class='center'>" + str(index) + "</td>"
+            "<td>" + _esc(row["subject"] or row["course"] or "") + "</td>"
+            "<td>" + criteria_html + "</td>"
+            "<td class='center'>" + _number(row["totalScore"]) + "</td>"
+            "<td class='center'>" + _number(row["maximumScore"]) + "</td>"
+            "<td class='center'>" + _esc(row["grade"] or "—") + "</td>"
+            "</tr>"
+        )
+
+    html = (
+        "<!DOCTYPE html><html><head><meta charset='utf-8'><style>"
+        "@page { size: A4; margin: 10mm; }"
+        "body { font-family: Arial, Helvetica, sans-serif; font-size: 10px; color: #111; }"
+        ".card { width: 100%; }"
+        ".head { text-align: center; border-bottom: 2px solid #3d356b; padding-bottom: 10px; margin-bottom: 12px; }"
+        ".institute { font-size: 16px; font-weight: bold; color: #3d356b; }"
+        ".title { font-size: 20px; font-weight: bold; letter-spacing: 2px; margin-top: 6px; }"
+        ".subtitle { margin-top: 4px; font-size: 11px; }"
+        ".details { width: 100%; border-collapse: collapse; margin-bottom: 12px; }"
+        ".details td { border: 1px solid #8b8b8b; padding: 5px 7px; }"
+        ".label { background: #f2f0fa; font-weight: bold; width: 16%; }"
+        "table.marks { width: 100%; border-collapse: collapse; page-break-inside: avoid; }"
+        "table.marks th, table.marks td { border: 1px solid #555; padding: 5px 6px; vertical-align: top; }"
+        "table.marks th { background: #3d356b; color: #fff; text-align: center; font-size: 9px; }"
+        ".center { text-align: center; }"
+        ".summary { background: #f2f0fa; font-weight: bold; }"
+        ".signatures { width: 100%; margin-top: 28px; border-collapse: collapse; }"
+        ".signatures td { border: none; text-align: center; padding-top: 18px; }"
+        ".footer { margin-top: 14px; text-align: center; font-size: 9px; color: #555; }"
+        "</style></head><body><div class='card'>"
+        "<div class='head'>"
+        "<div class='institute'>" + _esc(_institute_name()) + "</div>"
+        "<div class='title'>MARKS CARD</div>"
+        "<div class='subtitle'>" + _esc(assessment_label) + " &nbsp;|&nbsp; " + _esc(academic_year or "—") + "</div>"
+        "</div>"
+        "<table class='details'>"
+        "<tr>"
+        "<td class='label'>Student Name</td><td>" + _esc(record.student_name or record.name) + "</td>"
+        "<td class='label'>Student ID</td><td>" + _esc(record.name) + "</td>"
+        "</tr>"
+        "<tr>"
+        "<td class='label'>Standard / Class</td><td>" + _esc(standard or "—") + "</td>"
+        "<td class='label'>Academic Year</td><td>" + _esc(academic_year or "—") + "</td>"
+        "</tr>"
+        "</table>"
+        "<table class='marks'>"
+        "<thead><tr>"
+        "<th style='width: 6%;'>Sr No</th>"
+        "<th style='width: 20%;'>Subject</th>"
+        "<th>Criteria Breakdown</th>"
+        "<th style='width: 12%;'>Total Marks Obtained</th>"
+        "<th style='width: 11%;'>Maximum Marks</th>"
+        "<th style='width: 8%;'>Grade</th>"
+        "</tr></thead><tbody>"
+        + body_rows
+        + "<tr class='summary'><td colspan='3'>Total</td><td class='center'>" + _number(total_obtained) + "</td><td class='center'>" + _number(total_maximum) + "</td><td class='center'>&mdash;</td></tr>"
+        + "<tr class='summary'><td colspan='3'>Percentage</td><td colspan='3'>" + _number(percentage) + "%</td></tr>"
+        + "<tr class='summary'><td colspan='3'>Overall Result</td><td colspan='3'>&mdash;</td></tr>"
+        + "</tbody></table>"
+        "<table class='signatures'><tr>"
+        "<td>______________________<br>Class Teacher</td>"
+        "<td>______________________<br>Principal</td>"
+        "</tr></table>"
+        "<div class='footer'>Generated on " + _esc(formatdate(nowdate())) + "</div>"
+        "</div></body></html>"
+    )
+    return html
+
+
+@frappe.whitelist()
+def download_marks_card(assessment):
+    require_education_access()
+
+    if not is_student_portal():
+        frappe.throw(
+            "Marks cards are only available for students.",
+            frappe.PermissionError,
+        )
+
+    record = get_student_record()
+    if not record:
+        frappe.throw(
+            "No student record is linked to this account yet. Contact your administrator.",
+            frappe.ValidationError,
+        )
+
+    rows = []
+    for row in _get_student_results(record.name):
+        if row["assessmentId"] == assessment:
+            rows.append(row)
+
+    if not rows:
+        frappe.throw(
+            "No submitted results found for this assessment.",
+            frappe.ValidationError,
+        )
+
+    groups = frappe.get_all(
+        "Student Group Student",
+        filters={"student": record.name},
+        pluck="parent",
+    )
+
+    enrollment = frappe.get_all(
+        "Program Enrollment",
+        filters={"student": record.name},
+        fields=["program", "academic_year"],
+        order_by="creation desc",
+        limit_page_length=1,
+    )
+
+    program = enrollment[0].program if enrollment else ""
+    standard = _student_standard(record.name, groups, program)
+    academic_year = ""
+    if enrollment:
+        academic_year = enrollment[0].academic_year or ""
+    if not academic_year:
+        academic_year = rows[0]["academicYear"] or ""
+
+    assessment_label = str(rows[0]["assessment"] or assessment).strip()
+    duplicate_labels = 0
+    for assessment_row in _student_assessment_rows(record.name):
+        if _assessment_label(assessment_row.assessment_plan).strip() == assessment_label:
+            duplicate_labels += 1
+    if duplicate_labels > 1:
+        assessment_label = assessment_label + " (" + assessment + ")"
+
+    html = _marks_card_html(
+        record,
+        rows,
+        assessment_label,
+        standard,
+        academic_year,
+    )
+
+    pdf = get_pdf(
+        html,
+        options={
+            "page-size": "A4",
+            "margin-top": "10mm",
+            "margin-bottom": "10mm",
+            "margin-left": "10mm",
+            "margin-right": "10mm",
+        },
+    )
+
+    student_part = re.sub(
+        r'[\\/:*?"<>|]+',
+        "",
+        str(record.student_name or record.name).strip(),
+    )
+    assessment_part = re.sub(
+        r'[\\/:*?"<>|]+',
+        "",
+        str(assessment_label).strip(),
+    )
+
+    frappe.response.filename = (
+        "MarksCard_" + student_part + "_" + assessment_part + ".pdf"
+    )
+    frappe.response.filecontent = pdf
+    frappe.response.type = "pdf"
 
 
 # =========================================================
