@@ -60,6 +60,33 @@ def _safe_value(value):
     return value if value is not None else ""
 
 
+def _student_standard(student, groups=None, program=None):
+    standard = ""
+
+    if frappe.db.has_column("Student", "standard"):
+        standard = frappe.db.get_value("Student", student, "standard") or ""
+
+    if not standard and frappe.db.has_column("Student", "division"):
+        division = frappe.db.get_value("Student", student, "division")
+        if division:
+            standard = frappe.db.get_value("Division", division, "standard") or ""
+
+    if not standard and groups:
+        for group in groups:
+            group_program = frappe.db.get_value("Student Group", group, "program")
+            if group_program:
+                standard = (
+                    frappe.db.get_value("Program", group_program, "program_name")
+                    or group_program
+                )
+                break
+
+    if not standard and program:
+        standard = frappe.db.get_value("Program", program, "program_name") or program
+
+    return standard or ""
+
+
 # =========================================================
 # EDUCATION DASHBOARD
 # =========================================================
@@ -2573,27 +2600,6 @@ def get_grades():
         pluck="parent",
     )
 
-    standard = ""
-
-    if groups:
-        group_students = frappe.get_all(
-            "Student Group Student",
-            filters={"parent": ["in", groups], "student": student},
-            fields=["student"],
-            limit_page_length=1,
-        )
-
-        if group_students:
-            standard = (
-                frappe.db.get_value(
-                    "Student", group_students[0].student, "standard"
-                )
-                or ""
-            )
-
-    if not standard:
-        standard = frappe.db.get_value("Student", student, "standard") or ""
-
     # ---------------------------------------------------------
     # Enrolled courses
     # ---------------------------------------------------------
@@ -2606,6 +2612,12 @@ def get_grades():
         fields=["name", "program", "academic_year", "academic_term"],
         order_by="creation desc",
         limit_page_length=1,
+    )
+
+    standard = _student_standard(
+        student,
+        groups,
+        enrollment[0].program if enrollment else "",
     )
 
     if enrollment:
