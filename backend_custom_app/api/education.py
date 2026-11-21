@@ -118,11 +118,13 @@ def _get_student_results(student):
     )
 
     plan_dates = {}
+    plan_groups = {}
     for row in rows:
         if row.assessment_plan and row.assessment_plan not in plan_dates:
             plan_dates[row.assessment_plan] = frappe.db.get_value(
                 "Assessment Plan", row.assessment_plan, "schedule_date"
             )
+            plan_groups[row.assessment_plan] = _assessment_group(row.assessment_plan)
 
     def _assessment_date(row):
         value = plan_dates.get(row.assessment_plan)
@@ -180,10 +182,12 @@ def _get_student_results(student):
             )
         ]
 
+        ag = plan_groups.get(row.assessment_plan) or ""
         results.append({
             "id": row.name,
             "assessmentId": row.assessment_plan or "",
             "assessment": plan_name,
+            "assessmentGroup": ag,
             "course": course_name,
             "subject": subject_name,
             "program": row.program or "",
@@ -214,6 +218,49 @@ def _assessment_label(plan):
     if not plan:
         return ""
     return str(frappe.db.get_value("Assessment Plan", plan, "assessment_name") or plan)
+
+
+def _assessment_group(plan):
+    if not plan:
+        return ""
+    return str(frappe.db.get_value("Assessment Plan", plan, "assessment_group") or "")
+
+
+def _all_assessment_groups():
+    rows = frappe.get_all(
+        "Assessment Group",
+        fields=["name", "parent_assessment_group", "is_group"],
+        order_by="name asc",
+    )
+    by_parent = {}
+    parents = {}
+    is_group_map = {}
+    for row in rows:
+        name = str(row.name or "")
+        parent = str(row.parent_assessment_group or "")
+        if not name:
+            continue
+        parents[name] = parent
+        is_group_map[name] = int(row.is_group or 0)
+        by_parent.setdefault(parent, []).append(name)
+    return parents, by_parent, is_group_map
+
+
+def _descendants_of(group_name, by_parent):
+    out = []
+    stack = list(by_parent.get(group_name, []))
+    seen = set()
+    while stack:
+        cur = stack.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        out.append(cur)
+        children = by_parent.get(cur, [])
+        for child in children:
+            if child not in seen:
+                stack.append(child)
+    return out
 
 
 # =========================================================
@@ -2696,7 +2743,7 @@ def get_assessments():
 
 
 @frappe.whitelist()
-def get_grades():
+def get_grades(assessment_group=None):
     """Assessment results for the signed-in learner only."""
 
     require_education_access()
@@ -2765,21 +2812,34 @@ def get_grades():
 
     results = _get_student_results(student)
 
+    parents_map, by_parent_map, is_group_map = _all_assessment_groups()
+    selected_set = set()
+    for row in results:
+        ag = str(row.get("assessmentGroup") or "").strip()
+        if not ag:
+            continue
+        if ag == "All Assessment Groups":
+            continue
+        selected_set.add(ag)
+        cur = ag
+        guard = 0
+        while cur and guard < 100:
+            parent = parents_map.get(cur, "")
+            if not parent:
+                break
+            if parent == "All Assessment Groups":
+                break
+            selected_set.add(parent)
+            cur = parent
+            guard += 1
+
     assessments = []
-    assessment_values = []
-    assessment_labels = []
-    for assessment_row in _student_assessment_rows(student):
-        plan = assessment_row.assessment_plan
-        if plan and plan not in assessment_values:
-            assessment_values.append(plan)
-            label = _assessment_label(plan)
-            if label in assessment_labels:
-                label = label + " (" + plan + ")"
-            assessment_labels.append(label)
-            assessments.append({
-                "value": plan,
-                "label": label,
-            })
+    selected_list = sorted(selected_set)
+    for name in selected_list:
+        assessments.append({
+            "value": name,
+            "label": name,
+        })
 
     latest = results[0] if results else None
     latest_score = latest["totalScore"] if latest else 0
@@ -2795,6 +2855,7 @@ def get_grades():
         "courses": courses,
         "results": results,
         "assessments": assessments,
+        "assessmentGroupParents": parents_map,
         "summary": {
             "total": len(results),
             "averageScore": latest_score,
@@ -2925,12 +2986,12 @@ def _marks_card_html(record, rows, assessment_label, standard, academic_year):
 
 
 @frappe.whitelist()
-def download_marks_card(assessment):
+def download_result(assessment_group=None, assessment=None):
     require_education_access()
 
     if not is_student_portal():
         frappe.throw(
-            "Marks cards are only available for students.",
+            "Results are only available for students.",
             frappe.PermissionError,
         )
 
@@ -2941,14 +3002,27 @@ def download_marks_card(assessment):
             frappe.ValidationError,
         )
 
+    group_name = str(assessment_group or assessment or "").strip()
+    if not group_name:
+        frappe.throw("Select an assessment group first.", frappe.ValidationError)
+
+    parents_map, by_parent_map, is_group_map = _all_assessment_groups()
+    if group_name == "All Assessment Groups" or group_name not in parents_map:
+        frappe.throw("Invalid assessment group.", frappe.ValidationError)
+
+    allowed = set([group_name])
+    for name in _descendants_of(group_name, by_parent_map):
+        allowed.add(name)
+
     rows = []
     for row in _get_student_results(record.name):
-        if row["assessmentId"] == assessment:
+        ag = str(row.get("assessmentGroup") or "").strip()
+        if ag in allowed:
             rows.append(row)
 
     if not rows:
         frappe.throw(
-            "No submitted results found for this assessment.",
+            "No submitted results found for this assessment group.",
             frappe.ValidationError,
         )
 
@@ -2972,20 +3046,12 @@ def download_marks_card(assessment):
     if enrollment:
         academic_year = enrollment[0].academic_year or ""
     if not academic_year:
-        academic_year = rows[0]["academicYear"] or ""
-
-    assessment_label = str(rows[0]["assessment"] or assessment).strip()
-    duplicate_labels = 0
-    for assessment_row in _student_assessment_rows(record.name):
-        if _assessment_label(assessment_row.assessment_plan).strip() == assessment_label:
-            duplicate_labels += 1
-    if duplicate_labels > 1:
-        assessment_label = assessment_label + " (" + assessment + ")"
+        academic_year = rows[0].get("academicYear") or ""
 
     html = _marks_card_html(
         record,
         rows,
-        assessment_label,
+        group_name,
         standard,
         academic_year,
     )
@@ -3006,17 +3072,23 @@ def download_marks_card(assessment):
         "",
         str(record.student_name or record.name).strip(),
     )
-    assessment_part = re.sub(
+    group_part = re.sub(
         r'[\\/:*?"<>|]+',
         "",
-        str(assessment_label).strip(),
+        str(group_name).strip(),
     )
 
     frappe.response.filename = (
-        "MarksCard_" + student_part + "_" + assessment_part + ".pdf"
+        "Result_" + student_part + "_" + group_part + ".pdf"
     )
     frappe.response.filecontent = pdf
     frappe.response.type = "pdf"
+
+
+@frappe.whitelist()
+def download_marks_card(assessment=None, assessment_group=None):
+    # backward compatibility
+    return download_result(assessment_group=assessment_group or assessment)
 
 
 # =========================================================
