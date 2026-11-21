@@ -2885,6 +2885,27 @@ def _institute_name():
     return name or ""
 
 
+def _grade_badge_style(grade):
+    g = str(grade or "").strip().upper()
+    if g in ("A", "A+", "B", "B+"):
+        bg = "#dcfce7"
+        fg = "#166534"
+        bd = "#86efac"
+    elif g in ("C", "C+", "D"):
+        bg = "#fef3c7"
+        fg = "#92400e"
+        bd = "#fcd34d"
+    elif g == "F" or g == "FAIL":
+        bg = "#fee2e2"
+        fg = "#991b1b"
+        bd = "#fca5a5"
+    else:
+        bg = "#eef2ff"
+        fg = "#453D89"
+        bd = "#c7d2fe"
+    return "display:inline-block;padding:2px 8px;border-radius:999px;background:" + bg + ";color:" + fg + ";border:1px solid " + bd + ";font-weight:700;font-size:9px;"
+
+
 def _marks_card_html(record, rows, assessment_label, standard, academic_year):
     total_obtained = 0
     total_maximum = 0
@@ -2914,70 +2935,93 @@ def _marks_card_html(record, rows, assessment_label, standard, academic_year):
         else:
             criteria_html = "&mdash;"
 
+        grade_text = str(row.get("grade") or "").strip()
+        if not grade_text:
+            grade_html = "&mdash;"
+        else:
+            grade_html = "<span style='" + _grade_badge_style(grade_text) + "'>" + _esc(grade_text) + "</span>"
+
+        row_bg = "#ffffff"
+        if index % 2 == 0:
+            row_bg = "#FAF9FD"
+
         body_rows += (
-            "<tr>"
+            "<tr style='background:" + row_bg + ";'>"
             "<td class='center'>" + str(index) + "</td>"
-            "<td>" + _esc(row["subject"] or row["course"] or "") + "</td>"
+            "<td class='left'>" + _esc(row["subject"] or row["course"] or "") + "</td>"
             "<td>" + criteria_html + "</td>"
             "<td class='center'>" + _number(row["totalScore"]) + "</td>"
             "<td class='center'>" + _number(row["maximumScore"]) + "</td>"
-            "<td class='center'>" + _esc(row["grade"] or "—") + "</td>"
+            "<td class='center'>" + grade_html + "</td>"
             "</tr>"
         )
 
+    meta_line = _esc(assessment_label) + " | " + _esc(academic_year or "—")
+
     html = (
         "<!DOCTYPE html><html><head><meta charset='utf-8'><style>"
-        "@page { size: A4; margin: 10mm; }"
-        "body { font-family: Arial, Helvetica, sans-serif; font-size: 10px; color: #111; }"
+        "@page { size: A4; margin: 18mm 18mm 18mm 18mm; }"
+        "body { font-family: Arial, Helvetica, sans-serif; font-size: 10.5px; color: #1a1a1a; -webkit-print-color-adjust: exact; print-color-adjust: exact; }"
         ".card { width: 100%; }"
-        ".head { text-align: center; border-bottom: 2px solid #3d356b; padding-bottom: 10px; margin-bottom: 12px; }"
-        ".institute { font-size: 16px; font-weight: bold; color: #3d356b; }"
-        ".title { font-size: 20px; font-weight: bold; letter-spacing: 2px; margin-top: 6px; }"
-        ".subtitle { margin-top: 4px; font-size: 11px; }"
-        ".details { width: 100%; border-collapse: collapse; margin-bottom: 12px; }"
-        ".details td { border: 1px solid #8b8b8b; padding: 5px 7px; }"
-        ".label { background: #f2f0fa; font-weight: bold; width: 16%; }"
+        ".header { text-align: center; padding-bottom: 8px; }"
+        ".institute { font-size: 16px; font-weight: bold; color: #453D89; letter-spacing: 0.4px; }"
+        ".title { font-size: 20px; font-weight: bold; letter-spacing: 2.5px; color: #1a1a1a; margin-top: 8px; }"
+        ".meta { margin-top: 8px; font-size: 11px; color: #222; white-space: nowrap; }"
+        ".accent { height: 3px; background-color: #453D89; background-image: -webkit-linear-gradient(105deg, #453D89, #C8499A); background-image: linear-gradient(105deg, #453D89, #C8499A); margin: 12px 0 14px 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }"
+        ".details { width: 100%; border-collapse: collapse; margin-bottom: 14px; }"
+        ".details td { border: 1px solid #D9D4EE; padding: 7px 9px; }"
+        ".label { font-size: 8px; text-transform: uppercase; letter-spacing: 0.7px; color: #453D89; font-weight: bold; background: #F5F3FA; width: 18%; }"
+        ".value { font-size: 11px; color: #111111; font-weight: bold; }"
         "table.marks { width: 100%; border-collapse: collapse; page-break-inside: avoid; }"
-        "table.marks th, table.marks td { border: 1px solid #555; padding: 5px 6px; vertical-align: top; }"
-        "table.marks th { background: #3d356b; color: #fff; text-align: center; font-size: 9px; }"
+        "table.marks th, table.marks td { border: 1px solid #D9D4EE; padding: 7px 8px; vertical-align: top; }"
+        "table.marks th { background-color: #453D89; color: #ffffff; text-align: center; font-size: 9px; font-weight: bold; letter-spacing: 0.3px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }"
         ".center { text-align: center; }"
-        ".summary { background: #f2f0fa; font-weight: bold; }"
-        ".signatures { width: 100%; margin-top: 28px; border-collapse: collapse; }"
-        ".signatures td { border: none; text-align: center; padding-top: 18px; }"
-        ".footer { margin-top: 14px; text-align: center; font-size: 9px; color: #555; }"
+        ".left { text-align: left; }"
+        ".summary { width: 100%; border-collapse: collapse; margin-top: 12px; }"
+        ".summary td { border: 1px solid #D9D4EE; padding: 7px 9px; }"
+        ".summary-label { background: #F5F3FA; font-weight: bold; color: #453D89; width: 30%; }"
+        ".summary-value { font-weight: bold; color: #1E1B33; }"
+        ".pct { font-size: 14px; font-weight: bold; color: #453D89; }"
+        ".signatures { width: 100%; margin-top: 42px; border-collapse: collapse; page-break-inside: avoid; }"
+        ".signatures td { border: none; text-align: center; padding-top: 10px; font-size: 10px; color: #333; width: 50%; }"
+        ".sig-line { margin-bottom: 6px; color: #444; }"
+        ".footer { margin-top: 10px; text-align: center; font-size: 9px; color: #666; }"
         "</style></head><body><div class='card'>"
-        "<div class='head'>"
+        "<div class='header'>"
         "<div class='institute'>" + _esc(_institute_name()) + "</div>"
         "<div class='title'>MARKS CARD</div>"
-        "<div class='subtitle'>" + _esc(assessment_label) + " &nbsp;|&nbsp; " + _esc(academic_year or "—") + "</div>"
+        "<div class='meta'>" + meta_line + "</div>"
         "</div>"
-        "<table class='details'>"
+        "<div class='accent'></div>"
+        "<table class='details' cellpadding='0' cellspacing='0'>"
         "<tr>"
-        "<td class='label'>Student Name</td><td>" + _esc(record.student_name or record.name) + "</td>"
-        "<td class='label'>Student ID</td><td>" + _esc(record.name) + "</td>"
+        "<td class='label'>Student Name</td><td class='value'>" + _esc(record.student_name or record.name) + "</td>"
+        "<td class='label'>Student ID</td><td class='value'>" + _esc(record.name) + "</td>"
         "</tr>"
         "<tr>"
-        "<td class='label'>Standard / Class</td><td>" + _esc(standard or "—") + "</td>"
-        "<td class='label'>Academic Year</td><td>" + _esc(academic_year or "—") + "</td>"
+        "<td class='label'>Standard / Class</td><td class='value'>" + _esc(standard or "—") + "</td>"
+        "<td class='label'>Academic Year</td><td class='value'>" + _esc(academic_year or "—") + "</td>"
         "</tr>"
         "</table>"
         "<table class='marks'>"
         "<thead><tr>"
         "<th style='width: 6%;'>Sr No</th>"
-        "<th style='width: 20%;'>Subject</th>"
+        "<th style='width: 22%;'>Subject</th>"
         "<th>Criteria Breakdown</th>"
         "<th style='width: 12%;'>Total Marks Obtained</th>"
         "<th style='width: 11%;'>Maximum Marks</th>"
         "<th style='width: 8%;'>Grade</th>"
         "</tr></thead><tbody>"
         + body_rows
-        + "<tr class='summary'><td colspan='3'>Total</td><td class='center'>" + _number(total_obtained) + "</td><td class='center'>" + _number(total_maximum) + "</td><td class='center'>&mdash;</td></tr>"
-        + "<tr class='summary'><td colspan='3'>Percentage</td><td colspan='3'>" + _number(percentage) + "%</td></tr>"
-        + "<tr class='summary'><td colspan='3'>Overall Result</td><td colspan='3'>&mdash;</td></tr>"
         + "</tbody></table>"
-        "<table class='signatures'><tr>"
-        "<td>______________________<br>Class Teacher</td>"
-        "<td>______________________<br>Principal</td>"
+        "<table class='summary' cellpadding='0' cellspacing='0'>"
+        "<tr><td class='summary-label'>Total</td><td class='summary-value'>" + _number(total_obtained) + " / " + _number(total_maximum) + "</td></tr>"
+        "<tr><td class='summary-label'>Percentage</td><td class='summary-value'><span class='pct'>" + _number(percentage) + "%</span></td></tr>"
+        "<tr><td class='summary-label'>Overall Result</td><td class='summary-value'>&mdash;</td></tr>"
+        "</table>"
+        "<table class='signatures' cellpadding='0' cellspacing='0'><tr>"
+        "<td><div class='sig-line'>____________________________</div>Class Teacher</td>"
+        "<td><div class='sig-line'>____________________________</div>Principal</td>"
         "</tr></table>"
         "<div class='footer'>Generated on " + _esc(formatdate(nowdate())) + "</div>"
         "</div></body></html>"
