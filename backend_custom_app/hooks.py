@@ -26,7 +26,7 @@ app_license = "mit"
 
 # include js, css files in header of desk.html
 # app_include_css = "/assets/backend_custom_app/css/backend_custom_app.css"
-# app_include_js = "/assets/backend_custom_app/js/backend_custom_app.js"
+app_include_js = "/assets/backend_custom_app/js/messages_notifications.js?v=11"
 
 # include js, css files in header of web template
 # web_include_css = "/assets/backend_custom_app/css/backend_custom_app.css"
@@ -86,7 +86,12 @@ app_license = "mit"
 # ------------
 
 # before_install = "backend_custom_app.install.before_install"
-# after_install = "backend_custom_app.install.after_install"
+after_install = [
+    "backend_custom_app.patches.setup_default_message_group.execute",
+    "backend_custom_app.patches.add_messages_to_education_sidebar.execute",
+    "backend_custom_app.patches.configure_education_sidebar.execute",
+    "backend_custom_app.patches.fix_messages_page.execute",
+]
 
 # Uninstallation
 # ------------
@@ -191,6 +196,12 @@ doc_events = {
     },
     "Assessment Plan": {
         "on_submit": "backend_custom_app.api.student_notifications.assessment_plan_submitted"
+    },
+    "Student Group": {
+        "after_insert": "backend_custom_app.api.messages.student_group_after_insert",
+        "on_update": "backend_custom_app.api.messages.student_group_on_update",
+        "after_rename": "backend_custom_app.api.messages.student_group_after_rename",
+        "on_trash": "backend_custom_app.api.messages.student_group_on_trash",
     },
 }
 

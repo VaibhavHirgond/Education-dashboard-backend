@@ -1,8 +1,11 @@
 """Student-scoped in-app notifications backed by Frappe Notification Log."""
 
+from urllib.parse import quote
+
 import frappe
 from frappe.utils import add_days, flt, formatdate, strip_html, today
 
+from backend_custom_app.api.messages import is_group_member, message_group_from_notification
 from backend_custom_app.api.permissions import (
     get_student_record,
     is_student_portal,
@@ -115,18 +118,21 @@ def _notification_filters(user):
 def _serialize_notification(row):
     document_type = row.get("document_type") or ""
     creation = row.get("creation")
+    group = message_group_from_notification(row.get("description"), row.get("link"))
+    category = "Messages" if group else _category(document_type)
+    destination = "/messages?group=" + quote(str(group), safe="") if group else PORTAL_ROUTES.get(document_type, "")
 
     return {
         "name": row.name,
         "title": row.title or "Education update",
         "description": strip_html(row.description or ""),
         "type": row.type or NOTIFICATION_TYPE,
-        "category": _category(document_type),
+        "category": category,
         "creation": creation.isoformat() if hasattr(creation, "isoformat") else str(creation or ""),
         "read": bool(row.read),
         "document_type": document_type,
         "document_name": row.document_name or "",
-        "destination": PORTAL_ROUTES.get(document_type, ""),
+        "destination": destination,
     }
 
 
@@ -155,14 +161,26 @@ def get_student_notifications(limit=100):
             "read",
             "document_type",
             "document_name",
+            "link",
         ],
         order_by="creation desc",
         limit_page_length=page_length,
     )
+    visible_rows = []
+    for row in rows:
+        group = message_group_from_notification(row.get("description"), row.get("link"))
+        if group and not is_group_member(user, group):
+            continue
+        visible_rows.append(row)
+
+    unread_count = 0
+    for row in visible_rows:
+        if not row.read:
+            unread_count = unread_count + 1
 
     return {
-        "notifications": [_serialize_notification(row) for row in rows],
-        "unread_count": frappe.db.count("Notification Log", {**filters, "read": 0}),
+        "notifications": [_serialize_notification(row) for row in visible_rows],
+        "unread_count": unread_count,
     }
 
 

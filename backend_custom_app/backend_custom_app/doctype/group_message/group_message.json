@@ -1,0 +1,165 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-11-23 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+  "field_order": [
+   "group",
+   "sender",
+   "message_text",
+   "sent_at",
+   "message_type",
+   "attachment_file",
+   "file_name",
+   "file_size",
+   "mime_type",
+   "contact_user",
+   "poll",
+   "poll_question",
+   "is_voice_note"
+  ],
+ "fields": [
+  {
+   "fieldname": "group",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Group",
+   "options": "Message Group",
+   "reqd": 1
+  },
+  {
+   "fieldname": "sender",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Sender",
+   "options": "User",
+   "reqd": 1
+  },
+   {
+    "fieldname": "message_text",
+    "fieldtype": "Text",
+    "label": "Message Text"
+   },
+   {
+    "fieldname": "sent_at",
+    "fieldtype": "Datetime",
+    "label": "Sent At"
+   },
+   {
+    "default": "text",
+    "fieldname": "message_type",
+    "fieldtype": "Select",
+    "in_list_view": 1,
+    "label": "Message Type",
+    "options": "\ntext\nimage\nvideo\naudio\nfile\ncontact\npoll\nsticker"
+   },
+   {
+    "fieldname": "attachment_file",
+    "fieldtype": "Link",
+    "label": "Attachment File",
+    "options": "File"
+   },
+   {
+    "fieldname": "file_name",
+    "fieldtype": "Data",
+    "in_list_view": 1,
+    "label": "File Name"
+   },
+   {
+    "fieldname": "file_size",
+    "fieldtype": "Int",
+    "label": "File Size"
+   },
+   {
+    "fieldname": "mime_type",
+    "fieldtype": "Data",
+    "label": "Mime Type"
+   },
+   {
+    "fieldname": "contact_user",
+    "fieldtype": "Link",
+    "label": "Contact User",
+    "options": "User"
+   },
+   {
+    "fieldname": "poll",
+    "fieldtype": "Link",
+    "label": "Poll",
+    "options": "Group Poll"
+   },
+   {
+    "fieldname": "poll_question",
+    "fieldtype": "Data",
+    "label": "Poll Question"
+   },
+   {
+    "default": "0",
+    "fieldname": "is_voice_note",
+    "fieldtype": "Check",
+    "label": "Is Voice Note"
+   }
+  ],
+ "links": [],
+ "modified": "2026-11-23 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Backend Custom App",
+ "name": "Group Message",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Administrator",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 0,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Education Manager",
+   "share": 1,
+   "write": 0
+  },
+  {
+   "create": 1,
+   "delete": 0,
+   "read": 1,
+   "role": "Academics User",
+   "write": 0
+  },
+  {
+   "create": 1,
+   "delete": 0,
+   "read": 1,
+   "role": "Instructor",
+   "write": 0
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
