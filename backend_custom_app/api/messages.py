@@ -1,10 +1,10 @@
 import io
 import re
 import zipfile
-from urllib.parse import parse_qs, quote
+from urllib.parse import parse_qs, quote, urlparse
 
 import frappe
-from frappe.utils import get_fullname, now_datetime
+from frappe.utils import cint, get_fullname, now_datetime
 from frappe.utils.file_manager import get_content_hash, save_file_on_filesystem
 
 
@@ -16,8 +16,17 @@ MESSAGE_NOTIFICATION_LINK = "/desk/messages"
 MESSAGE_NOTIFICATION_LINKS = ["/desk/messages", "/student-portal#/messages"]
 MESSAGE_NOTIFICATION_LINK_PREFIXES = ["/desk/messages%", "/student-portal#/messages%"]
 MESSAGE_MARKER_PATTERN = re.compile(r"\[messages:([^\]]+)\]")
+SHARED_LINK_PATTERN = re.compile(r"https?://[^\s<]+", re.IGNORECASE)
 HTML_TAG_PATTERN = re.compile(r"<[^>]*>")
 REMOVED_MEMBER_DOCTYPE = "Message Group Removed Member"
+MESSAGE_GROUP_MEMBER_DOCTYPE = "Message Group Member"
+MESSAGE_SEND_RULE_AUDIT_DOCTYPE = "Message Send Rule Audit"
+SEND_MODE_EVERYONE = "everyone"
+SEND_MODE_ADMINS_INSTRUCTORS = "admins_instructors"
+SEND_MODE_SELECTED = "selected"
+SEND_MODES = [SEND_MODE_EVERYONE, SEND_MODE_ADMINS_INSTRUCTORS, SEND_MODE_SELECTED]
+CUSTOM_GROUP_TYPE = "Custom"
+TYPING_RATE_LIMIT_SECONDS = 2
 MAX_IMAGE_SIZE = 10 * 1024 * 1024
 MAX_VIDEO_SIZE = 25 * 1024 * 1024
 MAX_AUDIO_SIZE = 10 * 1024 * 1024
@@ -71,8 +80,32 @@ def _clear_message_cache():
         frappe.local.message_cache = {}
 
 
+def _require_logged_in_user():
+    user = frappe.session.user
+    if user == "Guest":
+        frappe.throw("Please login.", frappe.PermissionError)
+    return user
+
+
 def _clean_caption(value):
     return str(value or "").strip()
+
+
+def _shared_links_from_text(value):
+    text = str(value or "")
+    links = []
+    seen = {}
+    matches = SHARED_LINK_PATTERN.findall(text)
+    i = 0
+    while i < len(matches):
+        link = str(matches[i] or "")
+        while link and ".,!?;:)]}'\"".find(link[-1]) >= 0:
+            link = link[:-1]
+        if link and not seen.get(link):
+            seen[link] = 1
+            links.append(link)
+        i = i + 1
+    return links
 
 
 def _safe_filename(value):
@@ -243,6 +276,9 @@ def _validate_group_for_send(group, action):
         frappe.throw("Group not found.", frappe.DoesNotExistError)
     if not is_group_member(user, group):
         frappe.throw("You do not have permission to " + action + " in this group.", frappe.PermissionError)
+    allowed, reason = _can_user_send_in_group(user, group)
+    if not allowed:
+        frappe.throw(reason, frappe.PermissionError)
     return user
 
 
@@ -446,6 +482,20 @@ def is_instructor_message_role(user=None):
     return user in _get_instructor_users()
 
 
+def _can_create_message_group(user=None):
+    user = user or frappe.session.user
+    if _is_message_admin(user):
+        return True
+    return is_instructor_message_role(user)
+
+
+def _can_manage_message_candidates(user=None):
+    user = user or frappe.session.user
+    if _is_message_admin(user):
+        return True
+    return is_instructor_message_role(user)
+
+
 def _can_use_messages(user):
     if is_staff_message_role(user):
         return True
@@ -532,6 +582,186 @@ def _get_removed_users(group):
         i = i + 1
     cache[key] = users
     return users
+
+
+def _group_doc(group, fields=None):
+    if not group:
+        return None
+    if fields is None:
+        fields = ["name", "group_name", "group_type", "student_group", "owner", "description", "is_default", "send_mode"]
+    return frappe.db.get_value("Message Group", group, fields, as_dict=True)
+
+
+def _get_custom_group_members(group):
+    cache = _message_cache()
+    key = "custom_members:" + str(group)
+    if key in cache:
+        return cache[key]
+    rows = frappe.get_all(
+        MESSAGE_GROUP_MEMBER_DOCTYPE,
+        filters={"parent": group, "parenttype": "Message Group", "parentfield": "members"},
+        fields=["name", "user", "is_admin", "added_by", "added_on"],
+        order_by="name asc",
+    )
+    result = []
+    seen = {}
+    i = 0
+    while i < len(rows):
+        user = rows[i].get("user")
+        if user and user not in seen:
+            seen[user] = 1
+            result.append(rows[i])
+        i = i + 1
+    cache[key] = result
+    return result
+
+
+def _get_explicit_group_member_name(group, user):
+    return frappe.db.get_value(
+        MESSAGE_GROUP_MEMBER_DOCTYPE,
+        {"parent": group, "parenttype": "Message Group", "parentfield": "members", "user": user},
+        "name",
+    )
+
+
+def _filter_enabled_users(members):
+    result = []
+    i = 0
+    while i < len(members):
+        user = members[i]
+        if _user_enabled(user) and user not in result:
+            result.append(user)
+        i = i + 1
+    return result
+
+
+def _append_custom_group_member(doc, user, actor, is_admin=0):
+    doc.append("members", {
+        "doctype": MESSAGE_GROUP_MEMBER_DOCTYPE,
+        "user": user,
+        "is_admin": 1 if is_admin else 0,
+        "added_by": actor,
+        "added_on": now_datetime(),
+    })
+
+
+def _remove_custom_group_member(group, user):
+    frappe.db.delete(
+        MESSAGE_GROUP_MEMBER_DOCTYPE,
+        {"parent": group, "parenttype": "Message Group", "parentfield": "members", "user": user},
+    )
+
+
+def _delete_removed_member(group, user):
+    name = frappe.db.get_value(REMOVED_MEMBER_DOCTYPE, {"group": group, "user": user}, "name")
+    if name:
+        frappe.delete_doc(REMOVED_MEMBER_DOCTYPE, name, ignore_permissions=True, force=True, delete_permanently=True)
+
+
+def _upsert_removed_member(group, user, removed_by, reason=None):
+    values = {"removed_by": removed_by, "removed_on": now_datetime()}
+    if reason is not None:
+        values["reason"] = reason
+    existing = frappe.db.get_value(REMOVED_MEMBER_DOCTYPE, {"group": group, "user": user}, "name")
+    if existing:
+        frappe.db.set_value(REMOVED_MEMBER_DOCTYPE, existing, values)
+        return
+    row = {
+        "doctype": REMOVED_MEMBER_DOCTYPE,
+        "group": group,
+        "user": user,
+    }
+    row.update(values)
+    frappe.get_doc(row).insert(ignore_permissions=True)
+
+
+def _can_manage_custom_group(user, group_doc=None, group=None):
+    if not user or user == "Guest":
+        return False
+    group_doc = group_doc or _group_doc(group)
+    if not group_doc or group_doc.group_type != CUSTOM_GROUP_TYPE:
+        return False
+    if not is_group_member(user, group_doc.name):
+        return False
+    if group_doc.owner == user:
+        return True
+    if _is_message_admin(user) or is_instructor_message_role(user):
+        return True
+    member = frappe.db.get_value(
+        MESSAGE_GROUP_MEMBER_DOCTYPE,
+        {"parent": group_doc.name, "parenttype": "Message Group", "parentfield": "members", "user": user},
+        "is_admin",
+    )
+    return bool(member)
+
+
+def _can_manage_members(user, group_doc):
+    if group_doc.group_type == CUSTOM_GROUP_TYPE:
+        return _can_manage_custom_group(user, group_doc)
+    return _is_message_admin(user)
+
+
+def _can_delete_custom_group(user, group_doc):
+    if not user or user == "Guest" or group_doc.group_type != CUSTOM_GROUP_TYPE:
+        return False
+    return bool(group_doc.owner == user or _is_message_admin(user))
+
+
+def _require_custom_group(group):
+    user = _require_logged_in_user()
+    if not group:
+        frappe.throw("Group is required.")
+    group_doc = _group_doc(group)
+    if not group_doc:
+        frappe.throw("Group not found.", frappe.DoesNotExistError)
+    if group_doc.group_type != CUSTOM_GROUP_TYPE:
+        frappe.throw("Only custom groups support this action.", frappe.PermissionError)
+    return user, group_doc
+
+
+def _require_group_membership(group, action):
+    user = _require_logged_in_user()
+    if not group:
+        frappe.throw("Group is required.")
+    group_doc = _group_doc(group)
+    if not group_doc:
+        frappe.throw("Group not found.", frappe.DoesNotExistError)
+    if not is_group_member(user, group_doc.name):
+        frappe.throw("You do not have permission to " + action + " in this group.", frappe.PermissionError)
+    return user, group_doc
+
+
+def _publish_group_access_changed(group, member, removed):
+    frappe.publish_realtime(
+        event="messages_group_access_changed",
+        message={"group": group, "user": member, "removed": removed},
+        user=member,
+        after_commit=True,
+    )
+
+
+def _publish_group_list_changed(group, members):
+    i = 0
+    while i < len(members):
+        frappe.publish_realtime(
+            event="messages_group_list_changed",
+            message={"group": group},
+            user=members[i],
+            after_commit=True,
+        )
+        i = i + 1
+
+
+def _publish_group_deleted(group, group_name, members):
+    i = 0
+    while i < len(members):
+        frappe.publish_realtime(
+            event="messages_group_deleted",
+            message={"group": group, "group_name": group_name},
+            user=members[i],
+            after_commit=True,
+        )
+        i = i + 1
 
 
 def _class_group_student_group(group_doc):
@@ -622,6 +852,8 @@ def _get_group_member_users(group):
         members = get_staff_group_members()
     elif group_doc.group_type == "All":
         members = get_all_members_group_members()
+    elif group_doc.group_type == CUSTOM_GROUP_TYPE:
+        members = [row.get("user") for row in _get_custom_group_members(group) if row.get("user")]
     else:
         return []
     removed = _get_removed_users(group)
@@ -634,15 +866,48 @@ def _get_group_member_users(group):
     return result
 
 
+def _get_member_rule_map(group):
+    cache = _message_cache()
+    key = "send_rules:" + str(group)
+    if key in cache:
+        return cache[key]
+    rows = frappe.get_all(
+        MESSAGE_GROUP_MEMBER_DOCTYPE,
+        filters={"parent": group, "parenttype": "Message Group", "parentfield": "members"},
+        fields=["user", "read_only", "can_send"],
+        order_by="name asc",
+    )
+    result = {}
+    i = 0
+    while i < len(rows):
+        user = rows[i].get("user")
+        if user and user not in result:
+            result[user] = {
+                "read_only": cint(rows[i].get("read_only")),
+                "can_send": cint(rows[i].get("can_send")),
+            }
+        i = i + 1
+    cache[key] = result
+    return result
+
+
+def _get_member_rule_row(group, user):
+    return _get_member_rule_map(group).get(user)
+
+
 def _get_group_member_details(group):
     details = []
     users = _get_group_member_users(group)
+    rules = _get_member_rule_map(group)
     i = 0
     while i < len(users):
+        row = rules.get(users[i]) or {}
         details.append({
             "user": users[i],
             "display_name": _user_display_name(users[i]),
             "role_label": _get_role_label(users[i]),
+            "read_only": bool(row.get("read_only")),
+            "can_send": bool(row.get("can_send")),
         })
         i = i + 1
     return details
@@ -673,9 +938,107 @@ def is_group_member(user, group_name):
     return False
 
 
+def _is_builtin_group(group_doc):
+    if not group_doc:
+        return False
+    name = str(group_doc.get("group_name") or group_doc.get("name") or "")
+    doc_name = str(group_doc.get("name") or "")
+    if name in (DEFAULT_STAFF_GROUP_NAME, DEFAULT_ALL_GROUP_NAME):
+        return True
+    if doc_name in (DEFAULT_STAFF_GROUP_NAME, DEFAULT_ALL_GROUP_NAME):
+        return True
+    return False
+
+
+def _can_user_send_in_group(user, group):
+    label = _get_role_label(user)
+    row = _get_member_rule_row(group, user) or {}
+    if row.get("read_only"):
+        return False, "You can only read this chat"
+    if label == "Admin" or label == "Instructor":
+        return True, ""
+    mode = frappe.db.get_value("Message Group", group, "send_mode") or SEND_MODE_EVERYONE
+    mode = str(mode)
+    if mode == SEND_MODE_ADMINS_INSTRUCTORS:
+        return False, "Only admins and instructors can send messages"
+    if mode == SEND_MODE_SELECTED:
+        if row.get("can_send"):
+            return True, ""
+        return False, "You can only read this chat"
+    return True, ""
+
+
+def _can_manage_send_rules(user, group_doc):
+    label = _get_role_label(user)
+    if label != "Admin" and label != "Instructor":
+        return False
+    if label == "Admin":
+        return True
+    if not group_doc or _is_builtin_group(group_doc):
+        return False
+    return is_group_member(user, group_doc.get("name"))
+
+
+def _require_send_rule_manager(group, action):
+    user = _require_logged_in_user()
+    label = _get_role_label(user)
+    if label != "Admin" and label != "Instructor":
+        frappe.throw("Students cannot " + action + ".", frappe.PermissionError)
+    group_doc = _group_doc(group)
+    if not group_doc:
+        frappe.throw("Group not found.", frappe.DoesNotExistError)
+    if not _can_manage_send_rules(user, group_doc):
+        if _is_builtin_group(group_doc):
+            frappe.throw("Only administrators can " + action + " for this group.", frappe.PermissionError)
+        frappe.throw("You do not have permission to " + action + " in this group.", frappe.PermissionError)
+    return user, group_doc
+
+
+def _ensure_member_rule_row(group, user, actor):
+    name = _get_explicit_group_member_name(group, user)
+    if name:
+        return name
+    doc = frappe.get_doc("Message Group", group)
+    _append_custom_group_member(doc, user, actor, is_admin=0)
+    doc.save(ignore_permissions=True)
+    _clear_message_cache()
+    return _get_explicit_group_member_name(group, user)
+
+
+def _audit_send_rule_change(changed_by, group, member, setting, old_value, new_value):
+    frappe.get_doc({
+        "doctype": MESSAGE_SEND_RULE_AUDIT_DOCTYPE,
+        "changed_by": changed_by,
+        "group": group,
+        "member": member or None,
+        "setting": setting,
+        "old_value": str(old_value),
+        "new_value": str(new_value),
+        "changed_on": now_datetime(),
+    }).insert(ignore_permissions=True)
+
+
+def _publish_group_send_rules_changed(group, actor):
+    payload = {"group": group}
+    members = _get_group_member_users(group)
+    i = 0
+    while i < len(members):
+        if members[i] != actor:
+            frappe.publish_realtime(
+                event="messages_group_send_rules_changed",
+                message=payload,
+                user=members[i],
+                after_commit=True,
+            )
+        i = i + 1
+
+
 def ensure_default_staff_group():
-    if frappe.db.exists("Message Group", DEFAULT_STAFF_GROUP_NAME):
-        return DEFAULT_STAFF_GROUP_NAME
+    existing = frappe.db.exists("Message Group", DEFAULT_STAFF_GROUP_NAME)
+    if not existing:
+        existing = frappe.db.get_value("Message Group", {"group_name": DEFAULT_STAFF_GROUP_NAME}, "name")
+    if existing:
+        return existing
     doc = frappe.get_doc({
         "doctype": "Message Group",
         "group_name": DEFAULT_STAFF_GROUP_NAME,
@@ -684,11 +1047,13 @@ def ensure_default_staff_group():
         "description": "Default group for Administrators and all Instructors"
     })
     doc.insert(ignore_permissions=True)
-    return DEFAULT_STAFF_GROUP_NAME
+    return doc.name
 
 
 def ensure_all_members_group():
     existing = frappe.db.exists("Message Group", DEFAULT_ALL_GROUP_NAME)
+    if not existing:
+        existing = frappe.db.get_value("Message Group", {"group_name": DEFAULT_ALL_GROUP_NAME}, "name")
     if existing:
         if frappe.db.get_value("Message Group", existing, "group_type") != "All":
             frappe.db.set_value("Message Group", existing, "group_type", "All")
@@ -701,7 +1066,7 @@ def ensure_all_members_group():
         "description": "All Administrators, Instructors and Students"
     })
     doc.insert(ignore_permissions=True)
-    return DEFAULT_ALL_GROUP_NAME
+    return doc.name
 
 
 def ensure_class_message_group(student_group_name):
@@ -709,7 +1074,7 @@ def ensure_class_message_group(student_group_name):
         return None
     by_link = frappe.db.get_value("Message Group", {"student_group": student_group_name}, "name")
     by_name = frappe.db.get_value("Message Group", {"group_name": student_group_name}, "name")
-    target = by_name or by_link
+    target = by_link or by_name
     description = "Class group for " + student_group_name
     if target:
         current = frappe.db.get_value(
@@ -729,8 +1094,8 @@ def ensure_class_message_group(student_group_name):
             values["description"] = description
         if values:
             frappe.db.set_value("Message Group", target, values, update_modified=False)
-        if by_link and by_name and by_link != by_name:
-            frappe.db.set_value("Message Group", by_link, "student_group", None, update_modified=False)
+        if by_link and by_name and by_link != by_name and by_name != target:
+            frappe.db.set_value("Message Group", by_name, "student_group", None, update_modified=False)
         return target
     doc = frappe.get_doc({
         "doctype": "Message Group",
@@ -767,7 +1132,7 @@ def student_group_after_rename(doc, method=None, old=None, new=None, merge=None)
     target = frappe.db.get_value("Message Group", {"student_group": old_name}, "name")
     if not target:
         target = frappe.db.get_value("Message Group", {"group_name": old_name}, "name")
-    if target and target != new_name and not frappe.db.exists("Message Group", new_name):
+    if target and target == old_name and target != new_name and not frappe.db.exists("Message Group", new_name):
         frappe.rename_doc("Message Group", target, new_name)
     ensure_class_message_group(new_name)
 
@@ -968,10 +1333,63 @@ def _delete_message_related(doc):
         frappe.delete_doc("Group Poll", poll_name, force=True, ignore_permissions=True, delete_permanently=True)
 
 
-def _last_group_message(group):
+def _upsert_group_message_read(user, group, field, value):
+    existing = frappe.db.get_value("Group Message Read", {"user": user, "group": group}, "name")
+    if existing:
+        frappe.db.set_value("Group Message Read", existing, field, value)
+        return
+    row = {
+        "doctype": "Group Message Read",
+        "user": user,
+        "group": group,
+    }
+    row[field] = value
+    frappe.get_doc(row).insert(ignore_permissions=True)
+
+
+def _get_message_read_value(user, group, field):
+    return frappe.db.get_value("Group Message Read", {"user": user, "group": group}, field)
+
+
+def _get_cleared_at(user, group):
+    return _get_message_read_value(user, group, "cleared_at")
+
+
+def _mark_sender_message_read(user, group, stamp):
+    if not stamp:
+        return
+    _upsert_group_message_read(user, group, "last_read_on", str(stamp))
+
+
+def _later_datetime(first, second):
+    left = str(first or "")
+    right = str(second or "")
+    if left > right:
+        return left
+    return right
+
+
+def _effective_message_cutoff(user, group):
+    row = frappe.db.get_value(
+        "Group Message Read",
+        {"user": user, "group": group},
+        ["last_read_on", "cleared_at"],
+        as_dict=True,
+    )
+    if not row:
+        return None
+    return _later_datetime(row.last_read_on, row.cleared_at)
+
+
+def _last_group_message(group, user=None):
+    filters = [["group", "=", group]]
+    if user:
+        cleared_at = _get_cleared_at(user, group)
+        if cleared_at:
+            filters.append(["creation", ">", cleared_at])
     rows = frappe.get_all(
         "Group Message",
-        filters={"group": group},
+        filters=filters,
         fields=[
             "message_text",
             "message_type",
@@ -1004,7 +1422,7 @@ def get_my_groups():
     groups = frappe.get_all(
         "Message Group",
         filters={},
-        fields=["name", "group_name", "group_type", "is_default", "description"],
+        fields=["name", "group_name", "group_type", "is_default", "description", "owner", "send_mode"],
         order_by="is_default desc, name asc",
     )
     with_messages = []
@@ -1014,7 +1432,9 @@ def get_my_groups():
         g = groups[i]
         if is_group_member(user, g.name):
             members = _get_group_member_details(g.name)
-            preview, last_at = _last_group_message(g.name)
+            preview, last_at = _last_group_message(g.name, user)
+            can_send, send_block_reason = _can_user_send_in_group(user, g.name)
+            own_rule = _get_member_rule_row(g.name, user) or {}
             item = {
                 "name": g.name,
                 "group_name": g.group_name,
@@ -1025,10 +1445,23 @@ def get_my_groups():
                 "members": members,
                 "unread_count": get_unread_count_for_group(user, g.name),
                 "can_remove_members": _is_message_admin(user),
+                "is_custom": bool(g.group_type == CUSTOM_GROUP_TYPE),
+                "created_by": g.owner or "",
+                "can_manage_members": _can_manage_members(user, g),
+                "can_delete_group": _can_delete_custom_group(user, g),
+                "can_create_group": _can_create_message_group(user),
+                "can_exit_group": True,
+                "send_mode": str(g.get("send_mode") or SEND_MODE_EVERYONE),
+                "current_user_role_label": _get_role_label(user),
+                "current_user_can_send": can_send,
+                "current_user_read_only": bool(own_rule.get("read_only")),
+                "current_user_send_block_reason": send_block_reason,
+                "can_manage_send_rules": _can_manage_send_rules(user, g),
                 "current_user": user,
                 "last_message_text": preview,
                 "last_message_at": last_at,
                 "last_message_sent_at": last_at,
+                "archived": bool(frappe.db.get_value("Group Message Read", {"user": user, "group": g.name}, "archived")),
             }
             if last_at:
                 with_messages.append(item)
@@ -1040,12 +1473,11 @@ def get_my_groups():
 
 
 def get_unread_count_for_group(user, group_name):
-    last_read = frappe.db.get_value("Group Message Read", {"user": user, "group": group_name}, "last_read_on")
-    if not last_read:
-        count = frappe.db.count("Group Message", {"group": group_name})
-        return count
-    count = frappe.db.count("Group Message", {"group": group_name, "creation": [">", last_read]})
-    return count
+    cutoff = _effective_message_cutoff(user, group_name)
+    filters = [["group", "=", group_name], ["sender", "!=", user]]
+    if cutoff:
+        filters.append(["creation", ">", cutoff])
+    return frappe.db.count("Group Message", filters)
 
 
 @frappe.whitelist()
@@ -1092,9 +1524,12 @@ def get_group_messages(group, limit=50, before=None):
         lim = 1
     if lim > 100:
         lim = 100
-    filters = {"group": group}
+    filters = [["group", "=", group]]
+    cleared_at = _get_cleared_at(user, group)
+    if cleared_at:
+        filters.append(["creation", ">", cleared_at])
     if before:
-        filters["creation"] = ["<", before]
+        filters.append(["creation", "<", before])
     rows = frappe.get_all(
         "Group Message",
         filters=filters,
@@ -1125,6 +1560,112 @@ def get_group_messages(group, limit=50, before=None):
         i = i + 1
     messages.reverse()
     return messages
+
+
+@frappe.whitelist()
+def get_group_send_rules(group):
+    user, group_doc = _require_send_rule_manager(group, "view send rules")
+    return {
+        "group": group_doc.name,
+        "send_mode": str(group_doc.get("send_mode") or SEND_MODE_EVERYONE),
+        "can_manage": True,
+        "members": _get_group_member_details(group_doc.name),
+    }
+
+
+@frappe.whitelist()
+def update_group_send_rules(group, send_mode=None, members=None):
+    user, group_doc = _require_send_rule_manager(group, "change send rules")
+    mode = str(send_mode or "")
+    if mode not in SEND_MODES:
+        frappe.throw("Unsupported send mode.")
+    old_mode = str(group_doc.get("send_mode") or SEND_MODE_EVERYONE)
+    if old_mode != mode:
+        _audit_send_rule_change(user, group_doc.name, None, "send_mode", old_mode, mode)
+        frappe.db.set_value("Message Group", group_doc.name, "send_mode", mode, update_modified=False)
+    if mode == SEND_MODE_SELECTED:
+        requested = _parse_member_list(members if members is not None else [])
+        group_members = _get_group_member_users(group_doc.name)
+        chosen = {}
+        i = 0
+        while i < len(requested):
+            if requested[i] in group_members:
+                chosen[requested[i]] = 1
+            i = i + 1
+        i = 0
+        while i < len(group_members):
+            member = group_members[i]
+            row = _get_member_rule_row(group_doc.name, member) or {}
+            old_value = cint(row.get("can_send"))
+            new_value = 1 if chosen.get(member) else 0
+            if old_value != new_value:
+                row_name = _ensure_member_rule_row(group_doc.name, member, user)
+                frappe.db.set_value(MESSAGE_GROUP_MEMBER_DOCTYPE, row_name, "can_send", new_value, update_modified=False)
+                _audit_send_rule_change(user, group_doc.name, member, "can_send", old_value, new_value)
+            i = i + 1
+    _clear_message_cache()
+    frappe.db.commit()
+    _publish_group_send_rules_changed(group_doc.name, user)
+    return get_group_send_rules(group_doc.name)
+
+
+@frappe.whitelist()
+def set_group_member_send_restriction(group, member=None, read_only=0):
+    user, group_doc = _require_send_rule_manager(group, "change member send access")
+    target = str(member or "").strip()
+    if not target:
+        frappe.throw("Member is required.")
+    if target == user:
+        frappe.throw("You cannot change your own send access.", frappe.PermissionError)
+    if target == "Administrator":
+        frappe.throw("Administrator cannot be restricted.", frappe.PermissionError)
+    if not is_group_member(target, group_doc.name):
+        frappe.throw("That member is not in this group.", frappe.PermissionError)
+    viewer_label = _get_role_label(user)
+    target_label = _get_role_label(target)
+    if viewer_label == "Instructor" and target_label != "Student":
+        frappe.throw("Instructors can restrict students only.", frappe.PermissionError)
+    value = str(read_only).lower()
+    new_value = 1 if value in ("1", "true", "yes") else 0
+    row = _get_member_rule_row(group_doc.name, target) or {}
+    old_value = cint(row.get("read_only"))
+    if old_value != new_value:
+        row_name = _ensure_member_rule_row(group_doc.name, target, user)
+        frappe.db.set_value(MESSAGE_GROUP_MEMBER_DOCTYPE, row_name, "read_only", new_value, update_modified=False)
+        _audit_send_rule_change(user, group_doc.name, target, "read_only", old_value, new_value)
+    _clear_message_cache()
+    frappe.db.commit()
+    _publish_group_send_rules_changed(group_doc.name, user)
+    return get_group_send_rules(group_doc.name)
+
+
+@frappe.whitelist()
+def publish_group_typing(group):
+    user, group_doc = _require_group_membership(group, "send typing")
+    key = "messages_group_typing:" + str(group_doc.name) + ":" + str(user)
+    cache = frappe.cache()
+    last = cache.get_value(key)
+    current = now_datetime().timestamp()
+    if last:
+        try:
+            if current - float(last) < TYPING_RATE_LIMIT_SECONDS:
+                return {"ok": True, "throttled": True}
+        except Exception:
+            pass
+    cache.set_value(key, current, expires_in_sec=TYPING_RATE_LIMIT_SECONDS)
+    payload = {
+        "group": group_doc.name,
+        "user": user,
+        "sender_name": _user_display_name(user),
+        "typing": True,
+    }
+    members = _get_group_member_users(group_doc.name)
+    i = 0
+    while i < len(members):
+        if members[i] != user:
+            frappe.publish_realtime(event="messages_group_typing", message=payload, user=members[i])
+        i = i + 1
+    return {"ok": True}
 
 
 def _message_notification_marker(group):
@@ -1305,6 +1846,7 @@ def send_group_message(group, text=None, message_type="text", contact_user=None,
         "sent_at": now_datetime()
     })
     doc.insert(ignore_permissions=True)
+    _mark_sender_message_read(user, group, doc.creation)
     frappe.db.commit()
     payload = _serialize_message(doc, user)
     _publish_new_message(payload, group, user)
@@ -1359,6 +1901,7 @@ def upload_group_attachment(group=None, caption=None, voice_note=None):
     }).insert(ignore_permissions=True)
     frappe.db.set_value("Group Message", doc.name, "attachment_file", file_doc.name, update_modified=False)
     doc = frappe.get_doc("Group Message", doc.name)
+    _mark_sender_message_read(user, group, doc.creation)
     frappe.db.commit()
     payload = _serialize_message(doc, user)
     _publish_new_message(payload, group, user)
@@ -1455,6 +1998,7 @@ def create_group_poll(group=None, question=None, options=None, caption=None):
     })
     message_doc.insert(ignore_permissions=True)
     frappe.db.set_value("Group Poll", poll_doc.name, "message", message_doc.name, update_modified=False)
+    _mark_sender_message_read(user, group, message_doc.creation)
     frappe.db.commit()
     payload = _serialize_message(message_doc, user)
     _publish_new_message(payload, group, user)
@@ -1579,6 +2123,152 @@ def mark_group_read(group):
 
 
 @frappe.whitelist()
+def set_group_archived(group, archived=1):
+    user = frappe.session.user
+    if user == "Guest":
+        frappe.throw("Please login.", frappe.PermissionError)
+    _ensure_class_groups_for_request()
+    ensure_default_staff_group()
+    ensure_all_members_group()
+    if not group:
+        frappe.throw("Group is required.")
+    if not frappe.db.exists("Message Group", group):
+        frappe.throw("Group not found.", frappe.DoesNotExistError)
+    if not is_group_member(user, group):
+        frappe.throw("You do not have permission.", frappe.PermissionError)
+    value = 1 if cint(archived) else 0
+    existing = frappe.db.get_value("Group Message Read", {"user": user, "group": group}, "name")
+    if existing:
+        frappe.db.set_value("Group Message Read", existing, "archived", value)
+    else:
+        frappe.get_doc({
+            "doctype": "Group Message Read",
+            "user": user,
+            "group": group,
+            "archived": value,
+        }).insert(ignore_permissions=True)
+    frappe.db.commit()
+    return {"ok": True, "archived": bool(value), "group": group}
+
+
+@frappe.whitelist()
+def get_group_shared_items(group, limit=5, offset=0, kind="all"):
+    user = frappe.session.user
+    if user == "Guest":
+        frappe.throw("Please login.", frappe.PermissionError)
+    _ensure_class_groups_for_request()
+    ensure_default_staff_group()
+    ensure_all_members_group()
+    if not group:
+        frappe.throw("Group is required.")
+    if not frappe.db.exists("Message Group", group):
+        frappe.throw("Group not found.", frappe.DoesNotExistError)
+    if not is_group_member(user, group):
+        frappe.throw("You do not have permission to view this group.", frappe.PermissionError)
+    lim = cint(limit)
+    if lim < 1:
+        lim = 5
+    if lim > 100:
+        lim = 100
+    off = cint(offset)
+    if off < 0:
+        off = 0
+    section = str(kind or "all").strip().lower()
+    if section not in ("all", "file", "link"):
+        section = "all"
+    fields = [
+        "name",
+        "sender",
+        "message_text",
+        "message_type",
+        "attachment_file",
+        "file_name",
+        "file_size",
+        "mime_type",
+        "is_voice_note",
+        "sent_at",
+        "creation",
+    ]
+    file_items = []
+    link_items = []
+    if section in ("all", "file"):
+        rows = frappe.get_all(
+            "Group Message",
+            filters=[["group", "=", group], ["attachment_file", "is", "set"]],
+            fields=fields,
+            order_by="creation desc",
+            limit_page_length=1000,
+        )
+        i = 0
+        while i < len(rows):
+            row = rows[i]
+            encoded = quote(str(row.name or ""), safe="")
+            file_items.append({
+                "kind": "file",
+                "message_name": row.name or "",
+                "file_name": row.file_name or "Attachment",
+                "file_size": int(row.file_size or 0),
+                "mime_type": row.mime_type or "application/octet-stream",
+                "message_type": row.message_type or "file",
+                "is_voice_note": bool(row.is_voice_note),
+                "sent_at": str(row.sent_at or row.creation or ""),
+                "download_url": "/api/method/backend_custom_app.api.messages.download_group_file?message_name=" + encoded,
+                "_sort_at": str(row.creation or row.sent_at or ""),
+            })
+            i = i + 1
+    if section in ("all", "link"):
+        rows = frappe.get_all(
+            "Group Message",
+            filters=[["group", "=", group], ["message_text", "like", "%http%"]],
+            fields=fields,
+            order_by="creation desc",
+            limit_page_length=1000,
+        )
+        i = 0
+        while i < len(rows):
+            row = rows[i]
+            urls = _shared_links_from_text(row.message_text)
+            j = 0
+            while j < len(urls):
+                url = urls[j]
+                link_items.append({
+                    "kind": "link",
+                    "message_name": row.name or "",
+                    "url": url,
+                    "host": urlparse(url).netloc or url,
+                    "sent_at": str(row.sent_at or row.creation or ""),
+                    "_sort_at": str(row.creation or row.sent_at or ""),
+                })
+                j = j + 1
+            i = i + 1
+    file_count = len(file_items)
+    link_count = len(link_items)
+    if section == "file":
+        items = file_items
+    elif section == "link":
+        items = link_items
+    else:
+        items = file_items + link_items
+        items.sort(key=lambda item: (item["_sort_at"], item["message_name"]), reverse=True)
+    count = len(items)
+    page = items[off:off + lim]
+    i = 0
+    while i < len(page):
+        page[i].pop("_sort_at", None)
+        i = i + 1
+    return {
+        "items": page,
+        "count": count,
+        "file_count": file_count,
+        "link_count": link_count,
+        "has_more": count > off + lim,
+        "limit": lim,
+        "offset": off,
+        "kind": section,
+    }
+
+
+@frappe.whitelist()
 def delete_group_message(message_name):
     user = frappe.session.user
     if user == "Guest":
@@ -1621,19 +2311,16 @@ def _is_class_group(group):
 
 def _require_group_admin(group):
     _ensure_class_groups_for_request()
-    user = frappe.session.user
-    if user == "Guest":
-        frappe.throw("Please login.", frappe.PermissionError)
+    user = _require_logged_in_user()
     if not group:
         frappe.throw("Group is required.")
-    group_doc = frappe.db.get_value(
-        "Message Group",
-        group,
-        ["group_type", "student_group"],
-        as_dict=True,
-    )
+    group_doc = _group_doc(group, ["name", "group_type", "student_group", "owner"])
     if not group_doc:
         frappe.throw("Group not found.", frappe.DoesNotExistError)
+    if group_doc.group_type == CUSTOM_GROUP_TYPE:
+        if not _can_manage_custom_group(user, group_doc):
+            frappe.throw("You do not have permission to manage group members.", frappe.PermissionError)
+        return user
     if not _is_message_admin(user):
         frappe.throw("You do not have permission to manage group members.", frappe.PermissionError)
     if group_doc.group_type == "Class":
@@ -1669,7 +2356,7 @@ def get_removed_group_members(group):
     rows = frappe.get_all(
         REMOVED_MEMBER_DOCTYPE,
         filters={"group": group},
-        fields=["name", "group", "user", "removed_by", "removed_on"],
+        fields=["name", "group", "user", "removed_by", "removed_on", "reason"],
         order_by="removed_on desc",
     )
     result = []
@@ -1684,6 +2371,7 @@ def get_removed_group_members(group):
             "removed_by": r.removed_by,
             "removed_by_name": _user_display_name(r.removed_by) if r.removed_by else "",
             "removed_on": str(r.removed_on) if r.removed_on else "",
+            "reason": r.reason or "",
         })
         i = i + 1
     return result
@@ -1700,6 +2388,9 @@ def remove_group_member(group, member):
         frappe.throw("Administrator cannot be removed.", frappe.PermissionError)
     if _is_class_group(group) and member not in _get_group_member_users(group):
         frappe.throw("User is not a member of this class group.", frappe.PermissionError)
+    group_doc = _group_doc(group)
+    if group_doc and group_doc.group_type == CUSTOM_GROUP_TYPE and member not in _get_group_member_users(group):
+        frappe.throw("User is not a member of this group.", frappe.PermissionError)
     existing = frappe.db.exists(
         REMOVED_MEMBER_DOCTYPE,
         {"group": group, "user": member},
@@ -1751,7 +2442,9 @@ def bulk_remove_group_members(group, members):
     requested = _parse_member_list(members)
     removed = dict(_get_removed_users(group))
     class_group = _is_class_group(group)
-    allowed_members = _get_group_member_users(group) if class_group else []
+    group_doc = _group_doc(group)
+    custom_group = bool(group_doc and group_doc.group_type == CUSTOM_GROUP_TYPE)
+    allowed_members = _get_group_member_users(group) if class_group or custom_group else []
     succeeded = []
     failed = []
     i = 0
@@ -1766,6 +2459,8 @@ def bulk_remove_group_members(group, members):
             reason = "Already removed from this group."
         elif class_group and member not in allowed_members:
             reason = "User is not a member of this class group."
+        elif custom_group and member not in allowed_members:
+            reason = "User is not a member of this group."
         elif not frappe.db.exists("User", {"name": member, "enabled": 1}):
             reason = "User not found or disabled."
         if reason:
@@ -1832,3 +2527,230 @@ def bulk_restore_group_members(group, members):
         "failed": failed,
         "skipped": {item["user"]: item["skipped"] for item in failed},
     }
+
+
+def _delete_custom_group_related(group):
+    messages = frappe.get_all("Group Message", filters={"group": group}, pluck="name")
+    i = 0
+    while i < len(messages):
+        doc = frappe.get_doc("Group Message", messages[i])
+        _delete_message_related(doc)
+        frappe.delete_doc("Group Message", messages[i], force=True, ignore_permissions=True, delete_permanently=True)
+        i = i + 1
+    polls = frappe.get_all("Group Poll", filters={"group": group}, pluck="name")
+    i = 0
+    while i < len(polls):
+        votes = frappe.get_all("Group Poll Vote", filters={"poll": polls[i]}, pluck="name")
+        j = 0
+        while j < len(votes):
+            if frappe.db.exists("Group Poll Vote", votes[j]):
+                frappe.delete_doc("Group Poll Vote", votes[j], force=True, ignore_permissions=True, delete_permanently=True)
+            j = j + 1
+        if frappe.db.exists("Group Poll", polls[i]):
+            frappe.delete_doc("Group Poll", polls[i], force=True, ignore_permissions=True, delete_permanently=True)
+        i = i + 1
+    frappe.db.delete("Group Message Read", {"group": group})
+    frappe.db.delete(REMOVED_MEMBER_DOCTYPE, {"group": group})
+    frappe.db.delete(
+        MESSAGE_GROUP_MEMBER_DOCTYPE,
+        {"parent": group, "parenttype": "Message Group", "parentfield": "members"},
+    )
+    frappe.delete_doc("Message Group", group, force=True, ignore_permissions=True, delete_permanently=True)
+
+
+@frappe.whitelist()
+def create_message_group(group_name, description=None, members=None):
+    user = _require_logged_in_user()
+    if not _can_create_message_group(user):
+        frappe.throw("You do not have permission to create message groups.", frappe.PermissionError)
+    name = _clean_caption(group_name)
+    if len(name) < 2 or len(name) > 60:
+        frappe.throw("Group name must be between 2 and 60 characters.")
+    requested = _parse_member_list(members or [])
+    member_users = _filter_enabled_users(requested)
+    doc = frappe.get_doc({
+        "doctype": "Message Group",
+        "group_name": name,
+        "group_type": CUSTOM_GROUP_TYPE,
+        "is_default": 0,
+        "description": _clean_caption(description),
+        "owner": user,
+    })
+    _append_custom_group_member(doc, user, user, is_admin=1)
+    i = 0
+    while i < len(member_users):
+        if member_users[i] != user:
+            _append_custom_group_member(doc, member_users[i], user)
+        i = i + 1
+    doc.insert(ignore_permissions=True)
+    _clear_message_cache()
+    _publish_group_list_changed(doc.name, _get_group_member_users(doc.name))
+    return {
+        "name": doc.name,
+        "group": doc.name,
+        "group_name": name,
+        "group_type": CUSTOM_GROUP_TYPE,
+    }
+
+
+@frappe.whitelist()
+def add_message_group_members(group, members):
+    user, group_doc = _require_custom_group(group)
+    if not _can_manage_custom_group(user, group_doc):
+        frappe.throw("You do not have permission to manage group members.", frappe.PermissionError)
+    requested = _parse_member_list(members)
+    member_users = _filter_enabled_users(requested)
+    doc = frappe.get_doc("Message Group", group_doc.name)
+    existing_members = _get_group_member_users(group_doc.name)
+    added = []
+    restored = []
+    i = 0
+    while i < len(member_users):
+        member = member_users[i]
+        if member not in existing_members:
+            _append_custom_group_member(doc, member, user)
+            added.append(member)
+            if frappe.db.exists(REMOVED_MEMBER_DOCTYPE, {"group": group_doc.name, "user": member}):
+                _delete_removed_member(group_doc.name, member)
+                restored.append(member)
+        i = i + 1
+    if added:
+        doc.save(ignore_permissions=True)
+        _clear_message_cache()
+        _publish_group_list_changed(group_doc.name, added)
+        i = 0
+        while i < len(added):
+            _publish_group_access_changed(group_doc.name, added[i], False)
+            i = i + 1
+    return {
+        "ok": True,
+        "group": group_doc.name,
+        "added": added,
+        "restored": restored,
+    }
+
+
+@frappe.whitelist()
+def get_message_group_candidates(group=None, search=None, limit=50):
+    user = _require_logged_in_user()
+    if not _can_manage_message_candidates(user):
+        frappe.throw("You do not have permission to view group candidates.", frappe.PermissionError)
+    group_doc = None
+    already = {}
+    if group:
+        group_doc = _group_doc(group)
+        if not group_doc:
+            frappe.throw("Group not found.", frappe.DoesNotExistError)
+        if group_doc.group_type != CUSTOM_GROUP_TYPE:
+            frappe.throw("Only custom groups support this action.", frappe.PermissionError)
+        if not _can_manage_custom_group(user, group_doc):
+            frappe.throw("You do not have permission to manage group members.", frappe.PermissionError)
+        members = _get_group_member_users(group_doc.name)
+        i = 0
+        while i < len(members):
+            already[members[i]] = 1
+            i = i + 1
+    term = str(search or "").strip().lower()
+    lim = cint(limit)
+    if lim < 1:
+        lim = 50
+    if lim > 200:
+        lim = 200
+    candidates = []
+    seen = {}
+    groups = [_get_admin_users(), _get_instructor_users(), _get_student_users()]
+    g = 0
+    while g < len(groups):
+        i = 0
+        while i < len(groups[g]):
+            uname = groups[g][i]
+            if uname and uname not in seen:
+                full_name = _user_display_name(uname)
+                email = frappe.db.get_value("User", uname, "email") or uname
+                matches = (
+                    not term
+                    or term in str(uname).lower()
+                    or term in full_name.lower()
+                    or term in str(email).lower()
+                )
+                if matches:
+                    seen[uname] = 1
+                    candidates.append({
+                        "user": uname,
+                        "full_name": full_name,
+                        "email": email,
+                        "role_label": _get_role_label(uname),
+                        "already_member": bool(already.get(uname)),
+                    })
+            i = i + 1
+        g = g + 1
+    return candidates[:lim]
+
+
+@frappe.whitelist()
+def clear_group_chat(group):
+    user, group_doc = _require_group_membership(group, "clear chat")
+    cleared_at = now_datetime()
+    _upsert_group_message_read(user, group_doc.name, "cleared_at", cleared_at)
+    frappe.publish_realtime(
+        event="messages_group_cleared",
+        message={"group": group_doc.name, "cleared_at": str(cleared_at)},
+        user=user,
+        after_commit=True,
+    )
+    frappe.db.commit()
+    return {"ok": True, "group": group_doc.name, "cleared_at": str(cleared_at)}
+
+
+@frappe.whitelist()
+def exit_message_group(group):
+    user, group_doc = _require_group_membership(group, "exit")
+    owner = group_doc.owner or ""
+    new_owner = ""
+    if group_doc.group_type == CUSTOM_GROUP_TYPE:
+        _remove_custom_group_member(group_doc.name, user)
+        _clear_message_cache()
+        if group_doc.owner == user:
+            remaining = _get_custom_group_members(group_doc.name)
+            i = 0
+            while i < len(remaining) and not new_owner:
+                row = remaining[i]
+                if row.get("user") != user and row.get("is_admin"):
+                    new_owner = row.get("user")
+                i = i + 1
+            i = 0
+            while i < len(remaining) and not new_owner:
+                member = remaining[i].get("user")
+                if member and member != user and (_is_message_admin(member) or is_instructor_message_role(member)):
+                    new_owner = member
+                i = i + 1
+            if new_owner:
+                frappe.db.set_value("Message Group", group_doc.name, "owner", new_owner, update_modified=False)
+                owner = new_owner
+    else:
+        _upsert_removed_member(group_doc.name, user, user, reason="Left")
+    _clear_message_cache()
+    _publish_group_access_changed(group_doc.name, user, True)
+    _publish_group_list_changed(group_doc.name, [user])
+    if new_owner:
+        _publish_group_list_changed(group_doc.name, [new_owner])
+    frappe.db.commit()
+    return {"ok": True, "group": group_doc.name, "owner": owner}
+
+
+@frappe.whitelist()
+def delete_message_group(group):
+    user, group_doc = _require_custom_group(group)
+    if not _can_delete_custom_group(user, group_doc):
+        frappe.throw("Only the group owner or an administrator can delete this group.", frappe.PermissionError)
+    members = _get_group_member_users(group_doc.name)
+    _publish_group_deleted(group_doc.name, group_doc.group_name, members)
+    frappe.db.savepoint("delete_message_group")
+    try:
+        _delete_custom_group_related(group_doc.name)
+    except Exception:
+        frappe.db.rollback(save_point="delete_message_group")
+        raise
+    _clear_message_cache()
+    frappe.db.commit()
+    return {"ok": True, "group": group_doc.name}

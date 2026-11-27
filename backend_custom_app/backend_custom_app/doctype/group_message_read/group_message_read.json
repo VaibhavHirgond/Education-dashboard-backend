@@ -4,11 +4,14 @@
  "creation": "2026-11-23 00:00:00.000000",
  "doctype": "DocType",
  "engine": "InnoDB",
- "field_order": [
-  "user",
-  "group",
-  "last_read_on"
- ],
+  "field_order": [
+   "user",
+   "group",
+   "last_read_on",
+   "archived",
+   "cleared_at"
+  ],
+
  "fields": [
   {
    "fieldname": "user",
@@ -26,12 +29,24 @@
    "options": "Message Group",
    "reqd": 1
   },
-  {
-   "fieldname": "last_read_on",
-   "fieldtype": "Datetime",
-   "label": "Last Read On"
-  }
- ],
+   {
+    "fieldname": "last_read_on",
+    "fieldtype": "Datetime",
+    "label": "Last Read On"
+   },
+   {
+    "default": "0",
+    "fieldname": "archived",
+    "fieldtype": "Check",
+    "label": "Archived"
+   },
+   {
+    "fieldname": "cleared_at",
+    "fieldtype": "Datetime",
+    "label": "Cleared At"
+   }
+  ],
+
  "links": [],
  "modified": "2026-11-23 00:00:00.000000",
  "modified_by": "Administrator",

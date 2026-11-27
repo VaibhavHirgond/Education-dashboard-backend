@@ -7,9 +7,10 @@
  "field_order": [
   "group",
   "user",
-  "removed_by",
-  "removed_on"
- ],
+   "removed_by",
+   "removed_on",
+   "reason"
+  ],
  "fields": [
   {
    "fieldname": "group",
@@ -34,13 +35,19 @@
    "label": "Removed By",
    "options": "User"
   },
-  {
-   "fieldname": "removed_on",
-   "fieldtype": "Datetime",
-   "in_list_view": 1,
-   "label": "Removed On"
-  }
- ],
+   {
+    "fieldname": "removed_on",
+    "fieldtype": "Datetime",
+    "in_list_view": 1,
+    "label": "Removed On"
+   },
+   {
+    "fieldname": "reason",
+    "fieldtype": "Data",
+    "in_list_view": 1,
+    "label": "Reason"
+   }
+  ],
  "links": [],
  "modified": "2026-11-24 00:00:00.000000",
  "modified_by": "Administrator",
